@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Queen</title>
+  <link rel="stylesheet" href="/shared/fonts.css">
+  <link rel="stylesheet" href="/shared/base.css">
+  <style>
+    .wrap { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; gap: 22px; }
+    .apps { display: grid; grid-template-columns: repeat(2, 260px); gap: 14px; }
+    .app { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; color: var(--text); display: flex; flex-direction: column; gap: 6px; transition: border-color .12s, box-shadow .12s; }
+    .app:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+    .app .ic { width: 36px; height: 36px; border-radius: 8px; background: var(--accent-bg); color: var(--accent); display: grid; place-items: center; margin-bottom: 6px; }
+    .app b { font-size: 15px; }
+    @media (max-width: 600px) { .apps { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand" id="brand"><div class="brand-mark">Q</div><div><div class="brand-t">The Queen</div><div class="brand-s">نظام إدارة المتجر</div></div></div>
+    <div class="apps">
+      <a class="app" href="/erp/"><div class="ic" id="i1"></div><b>النظام الإداري</b><span class="muted">الأصناف، المشتريات، الحسابات، القيود، التقارير، فواتير A4 والإعدادات</span></a>
+      <a class="app" href="/pos/"><div class="ic" id="i2"></div><b>نقطة البيع</b><span class="muted">البيع السريع بالباركود، الدفع، الورديات، الفاتورة الحرارية 80mm</span></a>
+    </div>
+  </div>
+  <script src="/shared/core.js"></script>
+  <script>
+    document.getElementById('i1').innerHTML = Q.icon('chart', 18);
+    document.getElementById('i2').innerHTML = Q.icon('pos', 18);
+    Q.get('/public').then((p) => {
+      document.getElementById('brand').innerHTML = `<div class="brand-mark">${p.store.logo ? `<img src="${p.store.logo}">` : 'Q'}</div><div><div class="brand-t">${Q.esc(p.store.name)}</div><div class="brand-s">نظام إدارة المتجر</div></div>`;
+    }).catch(() => {});
+  </script>
+</body>
+</html>

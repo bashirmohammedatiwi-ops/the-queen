@@ -1,0 +1,14 @@
+{
+  "name": "the-queen-erp",
+  "version": "1.0.0",
+  "description": "The Queen — نظام إداري ERP مع نقطة بيع POS",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings tests/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "the-queen-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "main": "main.cjs",
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  },
+  "description": "The Queen — نظام إدارة المتجر ونقطة البيع",
+  "author": "The Queen",
+  "homepage": "https://thequeen.local"
+}

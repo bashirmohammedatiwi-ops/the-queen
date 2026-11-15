@@ -1,0 +1,19 @@
+{
+  "appId": "com.thequeen.pos",
+  "productName": "The Queen POS",
+  "executableName": "TheQueenPOS",
+  "directories": { "output": "../dist", "buildResources": "build" },
+  "files": ["main.cjs", "preload.cjs", "connect.html", "package.json"],
+  "electronDist": ".electron/win32",
+  "electronVersion": "45.3.2",
+  "compression": "normal",
+  "asar": true,
+  "extraMetadata": { "queenMode": "pos" },
+  "extraResources": [{ "from": "build/icon.png", "to": "build/icon.png" }],
+  "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "icon": "build/icon.png" },
+  "nsis": {
+    "oneClick": false, "perMachine": true, "allowElevation": true, "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always", "createStartMenuShortcut": true, "shortcutName": "The Queen - الكاشير",
+    "artifactName": "TheQueen-POS-Setup-${version}.exe", "uninstallDisplayName": "The Queen POS"
+  }
+}

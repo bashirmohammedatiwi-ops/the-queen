@@ -1,0 +1,87 @@
+/* POS — نقطة البيع */
+body { overflow: hidden; user-select: none; }
+input, textarea { user-select: text; }
+.pos { display: grid; grid-template-columns: 1fr 410px; grid-template-rows: 50px 1fr; height: 100vh; }
+.ptop { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #fff; border-bottom: 1px solid var(--line); }
+.ptop .search { position: relative; flex: 1; max-width: 520px; }
+.ptop .search .input { height: 36px; padding-right: 34px; font-size: 14px; }
+.ptop .search svg { position: absolute; right: 10px; top: 10px; color: var(--faint); }
+.ptop .info { font-size: 12px; color: var(--muted); line-height: 1.25; text-align: left; }
+.ptop .info b { color: var(--text); display: block; font-size: 12.5px; }
+.live { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; margin-left: 4px; }
+.live.off { background: var(--err); }
+
+/* منطقة الأصناف */
+.prods { display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+.cats { display: flex; gap: 6px; padding: 10px 12px; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid var(--line); background: #fbfbfc; }
+.cats button { height: 30px; padding: 0 13px; border: 1px solid var(--line); background: #fff; border-radius: 15px; font: inherit; font-weight: 500; cursor: pointer; white-space: nowrap; color: #3b414b; }
+.cats button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.grid { flex: 1; overflow: auto; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; align-content: start; }
+.tile { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; cursor: pointer; text-align: right; font: inherit; display: flex; flex-direction: column; gap: 6px; min-height: 84px; transition: border-color .1s, box-shadow .1s; }
+.tile:hover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }
+.tile:active { transform: scale(.98); }
+.tile .nm { font-weight: 600; font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; flex: 1; }
+.tile .ft { display: flex; justify-content: space-between; align-items: center; }
+.tile .pr { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.tile .sk { font-size: 11px; color: var(--faint); }
+.tile .sk.low { color: var(--warn); }
+.tile .sk.out { color: var(--err); }
+
+/* السلة */
+.cart { background: #fff; border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.cart-h { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.cust { flex: 1; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border: 1px dashed var(--line); border-radius: 6px; cursor: pointer; color: var(--muted); min-width: 0; }
+.cust:hover { border-color: var(--accent); color: var(--accent); }
+.cust.set { border-style: solid; color: var(--text); background: var(--accent-bg); border-color: transparent; }
+.cust span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lines { flex: 1; overflow: auto; }
+.ln { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line-2); cursor: pointer; }
+.ln:hover { background: #fafbfc; }
+.ln.flash { animation: flash .5s; }
+@keyframes flash { from { background: var(--accent-bg); } }
+.ln .nm { font-weight: 600; line-height: 1.3; }
+.ln .sub { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ln .qt { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ln .qt button { width: 26px; height: 26px; border: 0; background: #fafbfc; cursor: pointer; display: grid; place-items: center; color: var(--muted); }
+.ln .qt button:hover { background: var(--line-2); color: var(--text); }
+.ln .qt span { min-width: 30px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ln .tt { min-width: 74px; text-align: left; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cart-empty { flex: 1; display: grid; place-items: center; color: var(--faint); text-align: center; padding: 20px; }
+.sum { border-top: 1px solid var(--line); padding: 10px 12px; background: #fbfbfc; }
+.sum .kv { display: flex; justify-content: space-between; padding: 2px 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sum .kv b { color: var(--text); font-weight: 600; }
+.sum .grand { display: flex; justify-content: space-between; align-items: baseline; margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.sum .grand span:first-child { font-weight: 600; }
+.sum .grand .v { font-size: 26px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.acts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 12px 8px; background: #fbfbfc; }
+.acts .btn { justify-content: center; }
+.paybtn { margin: 0 12px 12px; height: 52px; font-size: 17px; font-weight: 700; justify-content: center; border-radius: 8px; }
+
+/* نافذة الدفع */
+.pay-total { text-align: center; padding: 6px 0 14px; }
+.pay-total .k { color: var(--muted); }
+.pay-total .v { font-size: 34px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.methods { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 14px; }
+.methods button { height: 54px; border: 1px solid var(--line); background: #fff; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #3b414b; }
+.methods button.on { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.big-in { height: 46px !important; font-size: 20px !important; font-weight: 600; }
+.quick { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 8px; }
+.quick button { height: 36px; }
+.change { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: var(--ok-bg); color: var(--ok); font-weight: 600; }
+.change .v { font-size: 22px; font-variant-numeric: tabular-nums; }
+.change.neg { background: var(--err-bg); color: var(--err); }
+.done { text-align: center; padding: 10px 0; }
+.done .ic { width: 54px; height: 54px; border-radius: 50%; background: var(--ok-bg); color: var(--ok); display: grid; place-items: center; margin: 0 auto 10px; }
+
+/* رمز الدخول */
+.pin-dots { display: flex; justify-content: center; gap: 10px; margin: 18px 0; height: 14px; }
+.pin-dots i { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--line); }
+.pin-dots i.on { background: var(--accent); border-color: var(--accent); }
+.pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; direction: ltr; }
+.pad button { height: 54px; border: 1px solid var(--line); background: #fff; border-radius: 8px; font: inherit; font-size: 20px; font-weight: 600; cursor: pointer; }
+.pad button:hover { background: #f8f9fa; }
+.pad button:active { background: var(--accent-bg); }
+.list-pick div.it { padding: 9px 10px; border-bottom: 1px solid var(--line-2); cursor: pointer; display: flex; gap: 8px; }
+.list-pick div.it:hover { background: var(--accent-bg); }
+
+@media (max-width: 1000px) { .pos { grid-template-columns: 1fr 340px; } .grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); } }

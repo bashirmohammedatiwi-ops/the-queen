@@ -1,0 +1,26 @@
+{
+  "appId": "com.thequeen.admin",
+  "productName": "The Queen Admin",
+  "executableName": "TheQueenAdmin",
+  "directories": { "output": "../dist", "buildResources": "build" },
+  "files": ["main.cjs", "preload.cjs", "connect.html", "package.json"],
+  "electronDist": ".electron/win32",
+  "electronVersion": "45.3.2",
+  "compression": "normal",
+  "asar": true,
+  "extraMetadata": { "queenMode": "admin" },
+  "extraResources": [
+    { "from": "../server.js", "to": "server/server.js" },
+    { "from": "../package.json", "to": "server/package.json" },
+    { "from": "../lib", "to": "server/lib" },
+    { "from": "../public", "to": "server/public" },
+    { "from": "build/icon.png", "to": "build/icon.png" }
+  ],
+  "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "icon": "build/icon.png" },
+  "nsis": {
+    "oneClick": false, "perMachine": true, "allowElevation": true, "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always", "createStartMenuShortcut": true, "shortcutName": "The Queen - الإدارة",
+    "include": "build/installer-admin.nsh", "artifactName": "TheQueen-Admin-Setup-${version}.exe",
+    "uninstallDisplayName": "The Queen Admin", "deleteAppDataOnUninstall": false
+  }
+}
