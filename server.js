@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
+import { MEDIA_DIR, saveMedia, reservedQty, syncNow, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent } from './lib/web-sync.js';
 import {
   db, all, get, run, tx, round, today, localNow, ROOT, DATA_DIR,
   getSettings, saveSettings, hashPassword, checkPassword,
@@ -80,8 +81,14 @@ route('GET', '/api/public', null, () => {
 });
 
 // ===== الإعدادات =====
-route('GET', '/api/settings', ANY, () => getSettings());
-route('PUT', '/api/settings', ['admin'], ({ body }) => { const s = saveSettings(body); broadcast('settings'); return s; });
+// مفتاح ربط الموقع لا يظهر إلا للمدير
+const publicSettings = (s, user) => (user.role === 'admin' ? s : { ...s, web: { enabled: s.web.enabled, url: s.web.url } });
+route('GET', '/api/settings', ANY, ({ user }) => publicSettings(getSettings(), user));
+route('PUT', '/api/settings', ['admin'], ({ body, user }) => {
+  const s = saveSettings(body); broadcast('settings');
+  if (body.web) scheduleSync();
+  return publicSettings(s, user);
+});
 
 // ===== المستخدمين =====
 route('GET', '/api/users', ['admin'], () => all("SELECT id,name,username,role,active,created_at, CASE WHEN pin IS NOT NULL AND pin<>'' THEN 1 ELSE 0 END has_pin FROM users ORDER BY id"));
@@ -569,6 +576,56 @@ route('GET', '/api/dashboard', ADMIN, () => {
   };
 });
 
+// ===== المتجر الإلكتروني =====
+onWebEvent((type, data) => broadcast(type, data));
+route('GET', '/api/web/status', ADMIN, () => ({
+  ...webState(), configured: !!(getSettings().web.url && getSettings().web.key),
+  counts: Object.fromEntries(all('SELECT status, COUNT(*) n FROM web_orders GROUP BY status').map((r) => [r.status, r.n])),
+  published: get('SELECT COUNT(*) n FROM products WHERE active=1 AND web_published=1').n,
+}));
+route('POST', '/api/web/test', ['admin'], async ({ body }) => {
+  const cfg = { ...getSettings().web, ...(body.url ? { url: body.url } : {}), ...(body.key ? { key: body.key } : {}) };
+  return testConnection(cfg);
+});
+route('POST', '/api/web/sync', ADMIN, async () => syncNow());
+route('POST', '/api/web/media', ADMIN, ({ body }) => ({ name: saveMedia(body.data) }));
+route('GET', '/api/web/products', ADMIN, () => {
+  const reserved = reservedQty();
+  return all(`SELECT p.id, p.name, p.barcode, p.price, p.stock, p.unit, p.category_id, c.name category, p.web_published, p.web_description, p.web_images,
+    p.web_featured, p.web_new, p.web_compare_price FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1 ORDER BY p.name`)
+    .map((p) => ({ ...p, web_images: JSON.parse(p.web_images || '[]'), reserved: reserved.get(p.id) || 0 }));
+});
+route('PUT', '/api/web/products/:id', ADMIN, ({ body, params }) => {
+  const p = get('SELECT * FROM products WHERE id=?', params.id);
+  if (!p) throw new HttpError(404, 'الصنف غير موجود');
+  const imgs = Array.isArray(body.web_images) ? body.web_images.filter((x) => /^[a-f0-9]{40}\.(jpg|png|webp)$/.test(x)).slice(0, 10) : JSON.parse(p.web_images || '[]');
+  const v = (k, d) => (k in body ? body[k] : d);
+  run(`UPDATE products SET web_published=?, web_description=?, web_images=?, web_featured=?, web_new=?, web_compare_price=? WHERE id=?`,
+    v('web_published', p.web_published) ? 1 : 0, v('web_description', p.web_description) || null, JSON.stringify(imgs),
+    v('web_featured', p.web_featured) ? 1 : 0, v('web_new', p.web_new) ? 1 : 0, Number(v('web_compare_price', p.web_compare_price)) || null, p.id);
+  return { ok: true };
+});
+route('POST', '/api/web/products/bulk', ADMIN, ({ body }) => {
+  const ids = (body.ids || []).map(Number).filter(Boolean);
+  const field = { publish: 'web_published', featured: 'web_featured', new: 'web_new' }[body.field];
+  if (!field || !ids.length) throw bad('لا يوجد تحديد');
+  tx(() => { for (const id of ids) run(`UPDATE products SET ${field}=? WHERE id=?`, body.value ? 1 : 0, id); });
+  return { ok: true, n: ids.length };
+});
+route('GET', '/api/web/orders', ADMIN, ({ query }) => {
+  const w = []; const p = [];
+  if (query.status) { w.push('o.status=?'); p.push(query.status); }
+  if (query.q) { w.push('(o.no LIKE ? OR o.name LIKE ? OR o.phone LIKE ?)'); p.push(`%${query.q}%`, `%${query.q}%`, `%${query.q}%`); }
+  return all(`SELECT o.*, i.no invoice_no FROM web_orders o LEFT JOIN invoices i ON i.id=o.invoice_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY o.id DESC LIMIT 1000`, ...p)
+    .map((o) => ({ ...o, items: JSON.parse(o.items || '[]'), invoice_number: o.invoice_no ? fmtNo('sale', o.invoice_no) : null }));
+});
+route('PUT', '/api/web/orders/:id', ADMIN, async ({ body, params, user }) => {
+  const o = setOrderStatus(Number(params.id), body.status, user, { payment: body.payment, notes: body.staff_notes });
+  broadcast('products', { stock: true }); broadcast('web_orders');
+  syncNow().catch(() => {}); // إرسال الحالة الجديدة للموقع فوراً
+  return o;
+});
+
 // ===== النسخ الاحتياطي =====
 route('GET', '/api/backup', ['admin'], ({ res }) => {
   const file = path.join(DATA_DIR, `backup-${Date.now()}.db`);
@@ -584,11 +641,21 @@ route('GET', '/api/backup', ['admin'], ({ res }) => {
 
 // ===== الخادم =====
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 function serveStatic(req, res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   if (pathname === '/erp' || pathname === '/pos') { res.writeHead(302, { Location: pathname + '/' }); return res.end(); }
+  // صور منتجات المتجر الإلكتروني المحفوظة محلياً
+  if (pathname.startsWith('/media/')) {
+    const f = path.basename(pathname);
+    if (!/^[a-f0-9]{40}\.(jpg|png|webp)$/.test(f)) { res.writeHead(404); return res.end(); }
+    return fs.readFile(path.join(MEDIA_DIR, f), (err, data) => {
+      if (err) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' });
+      res.end(data);
+    });
+  }
   if (pathname.endsWith('/')) pathname += 'index.html';
   let decoded;
   try { decoded = decodeURIComponent(pathname); } catch { res.writeHead(400); return res.end(); }
@@ -683,6 +750,7 @@ export const ready = new Promise((resolve, reject) => {
   });
   server.listen(PORT, '0.0.0.0', () => {
     try { startDiscovery(); } catch { /* */ }
+    scheduleSync();
     console.log('\n  👑  The Queen — النظام يعمل\n');
     console.log(`  النظام الإداري (ERP):  http://localhost:${PORT}/erp/`);
     console.log(`  نقطة البيع (POS):      http://localhost:${PORT}/pos/`);

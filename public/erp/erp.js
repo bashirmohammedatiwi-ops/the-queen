@@ -7,6 +7,7 @@
   const NAV = [
     ['', [['/', 'لوحة التحكم', 'home']]],
     ['المبيعات', [['/sales/new', 'فاتورة بيع جديدة', 'plus'], ['/sales', 'فواتير المبيعات', 'file'], ['/customers', 'العملاء', 'users'], ['/receipts', 'سندات القبض', 'wallet']]],
+    ['المتجر الإلكتروني', [['/web/orders', 'طلبات الموقع', 'cart'], ['/web/products', 'منتجات الموقع', 'tag'], ['/web/settings', 'محتوى الموقع والربط', 'gear']]],
     ['المشتريات', [['/purchases/new', 'فاتورة شراء جديدة', 'plus'], ['/purchases', 'فواتير المشتريات', 'truck'], ['/suppliers', 'الموردين', 'users'], ['/payments', 'سندات الصرف', 'wallet']]],
     ['المخزون', [['/products', 'الأصناف', 'box'], ['/categories', 'التصنيفات', 'tag'], ['/stock', 'حركة المخزون', 'layers'], ['/labels', 'طباعة الباركود', 'barcode']]],
     ['المحاسبة', [['/accounts', 'دليل الحسابات', 'book'], ['/journal', 'القيود اليومية', 'list'], ['/expenses', 'المصروفات', 'cash'], ['/ledger', 'كشف حساب', 'file']]],
@@ -64,6 +65,9 @@
     document.getElementById('logout').onclick = async () => { try { await Q.post('/logout'); } catch { /* */ } localStorage.removeItem(Q.tokenKey); showLogin(); };
     window.onhashchange = route;
     route();
+    // تحديثات مباشرة: طلبات المتجر الإلكتروني الجديدة
+    Q.listen({ web_order: (d) => ERP.onWebOrder?.(d), web_orders: () => ERP.webBadge?.() });
+    if (ERP.user.role !== 'cashier') ERP.webBadge?.();
   }
 
   function route() {

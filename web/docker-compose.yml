@@ -1,0 +1,21 @@
+# مشروع مستقل باسم thequeen: شبكة وتخزين ومنفذ خاصة به فقط
+name: thequeen
+services:
+  web:
+    build: .
+    image: thequeen-web:latest
+    container_name: thequeen-web
+    restart: unless-stopped
+    ports:
+      - "7480:8080"
+    environment:
+      SYNC_KEY: ${SYNC_KEY:?SYNC_KEY is required}
+    volumes:
+      - thequeen_data:/data
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  thequeen_data:
