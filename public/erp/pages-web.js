@@ -112,35 +112,91 @@
   }
 
   // ===== منتجات الموقع =====
+  // ===== أقسام الموقع والبراندات (مشتركة) =====
+  let TAX = null;
+  const loadTax = async () => (TAX = await Q.get('/web/taxonomy'));
+  const mains = () => TAX.categories.filter((c) => !c.parent_id);
+  const subsOf = (id) => TAX.categories.filter((c) => c.parent_id && c.parent_id == id);
+  const catName = (id) => TAX.categories.find((c) => c.id == id)?.name || '';
+  const brandName = (id) => TAX.brands.find((b) => b.id == id)?.name || '';
+  const thumb = (f, s = 38, r = 6) => (f ? `<img src="/media/${f}" style="width:${s}px;height:${s}px;object-fit:cover;border-radius:${r}px;border:1px solid var(--line);display:block">`
+    : `<div style="width:${s}px;height:${s}px;border-radius:${r}px;background:var(--line-2);display:grid;place-items:center;color:var(--faint)">${icon('box', 16)}</div>`);
+  const opts = (list, sel, empty) => `<option value="">${empty}</option>` + list.map((x) => `<option value="${x.id}" ${x.id == sel ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+
+  // ===== منتجات الموقع =====
+  // بيانات الصنف (الاسم، السعر، المخزون، الباركود) تؤخذ تلقائياً من المتجر — للموقع يُضاف فقط: الوصف، الصور، القسم الرئيسي والفرعي، البراند
   ERP.page('/web/products', {
     title: 'منتجات المتجر الإلكتروني',
     async render(v) {
-      ERP.head('منتجات المتجر الإلكتروني', 'اختر ما يظهر في الموقع وأضف الصور والوصف', `<button class="btn" id="sync">${icon('refresh')} نشر التغييرات الآن</button>`);
-      const st = { q: '', f: '' };
-      v.innerHTML = `<div class="bar"><input class="input search" id="q" placeholder="بحث…"><div class="seg" id="ff"><button data-f="" class="on">الكل</button><button data-f="pub">المنشورة</button><button data-f="unpub">غير المنشورة</button><button data-f="noimg">منشورة بدون صور</button></div>
-        <span class="sp"></span><button class="btn sm" id="pa">نشر كل المتوفر</button></div><div class="card tbl-wrap" id="list"></div>`;
+      ERP.head('منتجات المتجر الإلكتروني', 'الاسم والسعر والمخزون تُؤخذ تلقائياً من أصناف المتجر — أضف للموقع الصور والوصف والقسم والبراند فقط',
+        `<a class="btn" href="#/web/catalog">${icon('tag')} الأقسام والبراندات</a><button class="btn primary" id="sync">${icon('refresh')} نشر الآن</button>`);
+      const st = { q: '', f: '', cat: '', brand: '' };
+      const sel = new Set();
+      v.innerHTML = `<div class="bar"><input class="input search" id="q" placeholder="بحث بالاسم أو الباركود…">
+        <div class="seg" id="ff"><button data-f="" class="on">الكل</button><button data-f="pub">المنشورة</button><button data-f="unpub">غير المنشورة</button><button data-f="todo">ناقصة البيانات</button></div>
+        <select class="input" id="fc"></select><select class="input" id="fb"></select><span class="sp"></span><button class="btn sm" id="pa">نشر كل المتوفر</button></div>
+        <div class="card card-b" id="bulk" style="display:none;margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap"></div>
+        <div class="card tbl-wrap" id="list"></div>`;
       let rows = [];
-      const load = async () => { rows = await Q.get('/web/products'); draw(); };
-      const draw = () => {
+      const load = async () => { [rows] = await Promise.all([Q.get('/web/products'), loadTax()]); fillFilters(); draw(); };
+      const fillFilters = () => {
+        Q.$('#fc').innerHTML = `<option value="">كل الأقسام</option><option value="none" ${st.cat === 'none' ? 'selected' : ''}>بدون قسم</option>` + mains().map((c) => `<option value="${c.id}" ${st.cat == c.id ? 'selected' : ''}>${esc(c.name)}</option>`
+          + subsOf(c.id).map((s) => `<option value="${s.id}" ${st.cat == s.id ? 'selected' : ''}>&nbsp;&nbsp;↳ ${esc(s.name)}</option>`).join('')).join('');
+        Q.$('#fb').innerHTML = `<option value="">كل البراندات</option><option value="none" ${st.brand === 'none' ? 'selected' : ''}>بدون براند</option>` + TAX.brands.map((b) => `<option value="${b.id}" ${st.brand == b.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('');
+      };
+      const missing = (p) => [!p.web_images.length && 'صور', !(p.web_description || '').trim() && 'وصف', !p.web_cat_id && 'قسم', !p.web_brand_id && 'براند'].filter(Boolean);
+      const filtered = () => {
         const q = st.q.toLowerCase();
-        const list = rows.filter((p) => (!q || p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q)) &&
-          (st.f === 'pub' ? p.web_published : st.f === 'unpub' ? !p.web_published : st.f === 'noimg' ? p.web_published && !p.web_images.length : true));
+        return rows.filter((p) => (!q || p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q))
+          && (st.f === 'pub' ? p.web_published : st.f === 'unpub' ? !p.web_published : st.f === 'todo' ? missing(p).length : true)
+          && (!st.cat || (st.cat === 'none' ? !p.web_cat_id : p.web_cat_id == st.cat || p.web_sub_id == st.cat))
+          && (!st.brand || (st.brand === 'none' ? !p.web_brand_id : p.web_brand_id == st.brand)));
+      };
+      const drawBulk = () => {
+        const b = Q.$('#bulk');
+        if (!sel.size) { b.style.display = 'none'; return; }
+        b.style.display = 'flex';
+        b.innerHTML = `<b>${sel.size} محدد</b><button class="btn sm" data-b="pub1">${icon('check', 14)} نشر</button><button class="btn sm" data-b="pub0">إخفاء من الموقع</button>
+          <select class="input sm" id="bc" style="width:auto"><option value="">تعيين قسم…</option>${mains().map((c) => `<option value="${c.id}">${esc(c.name)}</option>` + subsOf(c.id).map((s) => `<option value="s${s.id}">&nbsp;&nbsp;↳ ${esc(s.name)}</option>`).join('')).join('')}<option value="0">— بدون قسم</option></select>
+          <select class="input sm" id="bb" style="width:auto"><option value="">تعيين براند…</option>${TAX.brands.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}<option value="0">— بدون براند</option></select>
+          <button class="btn sm" data-b="feat1">مميز</button><button class="btn sm" data-b="new1">جديد</button><span class="sp"></span><button class="btn sm" data-b="clr">إلغاء التحديد</button>`;
+        const ids = [...sel];
+        const act = async (body) => { try { await Q.post('/web/products/bulk', { ids, ...body }); Q.toast('تم التحديث', 'ok'); await load(); } catch (e) { Q.err(e); } };
+        Q.$$('[data-b]', b).forEach((x) => (x.onclick = () => {
+          const k = x.dataset.b;
+          if (k === 'clr') { sel.clear(); draw(); return; }
+          act({ pub1: { field: 'publish', value: true }, pub0: { field: 'publish', value: false }, feat1: { field: 'featured', value: true }, new1: { field: 'new', value: true } }[k]);
+        }));
+        Q.$('#bc').onchange = (e) => { const val = e.target.value; if (val === '') return; act(val.startsWith('s') ? { field: 'category', sub: Number(val.slice(1)) } : { field: 'category', value: Number(val) || null }); };
+        Q.$('#bb').onchange = (e) => { if (e.target.value === '') return; act({ field: 'brand', value: Number(e.target.value) || null }); };
+      };
+      const draw = () => {
+        const list = filtered();
         Q.$('#list').innerHTML = T([
-          { k: 'web_images', t: '', f: (x) => (x.length ? `<img src="/media/${x[0]}" style="width:38px;height:38px;object-fit:cover;border-radius:5px;border:1px solid var(--line)">` : `<div style="width:38px;height:38px;border-radius:5px;background:var(--line-2);display:grid;place-items:center;color:var(--faint)">${icon('box', 16)}</div>`) },
-          { k: 'name', t: 'المنتج', f: (x, p) => `<b>${esc(x)}</b><div class="faint">${esc(p.category || '')}</div>` },
+          { k: 'id', t: `<label class="chk"><input type="checkbox" id="all" ${list.length && list.every((p) => sel.has(p.id)) ? 'checked' : ''}></label>`, f: (x) => `<label class="chk"><input type="checkbox" data-s="${x}" ${sel.has(x) ? 'checked' : ''}></label>` },
+          { k: 'web_images', t: '', f: (x) => thumb(x[0]) },
+          { k: 'name', t: 'المنتج (من المتجر)', f: (x, p) => `<b>${esc(x)}</b><div class="faint">${esc(p.barcode || '')}${p.web_images.length > 1 ? ` · ${p.web_images.length} صور` : ''}</div>` },
+          { k: 'web_cat_id', t: 'القسم في الموقع', f: (x, p) => x ? `${esc(catName(x))}${p.web_sub_id ? `<div class="faint">↳ ${esc(catName(p.web_sub_id))}</div>` : ''}` : '<span class="faint">—</span>' },
+          { k: 'web_brand_id', t: 'البراند', f: (x) => (x ? esc(brandName(x)) : '<span class="faint">—</span>') },
           { k: 'price', t: 'السعر', cls: 'n', f: (x, p) => `${fmt(x)}${p.web_compare_price > x ? `<div class="faint" style="text-decoration:line-through">${fmt(p.web_compare_price)}</div>` : ''}` },
-          { k: 'stock', t: 'المتاح للموقع', cls: 'n', f: (x, p) => `<span class="${x - p.reserved <= 0 ? 'err' : ''}">${Q.qty(Math.max(0, x - p.reserved))}</span>${p.reserved ? `<div class="faint">محجوز ${Q.qty(p.reserved)}</div>` : ''}` },
+          { k: 'stock', t: 'المتاح', cls: 'n', f: (x, p) => `<span class="${x - p.reserved <= 0 ? 'err' : ''}">${Q.qty(Math.max(0, x - p.reserved))}</span>${p.reserved ? `<div class="faint">محجوز ${Q.qty(p.reserved)}</div>` : ''}` },
           { k: 'web_published', t: 'منشور', f: (x, p) => `<label class="chk"><input type="checkbox" data-t="web_published" data-id="${p.id}" ${x ? 'checked' : ''}></label>` },
           { k: 'web_featured', t: 'مميز', f: (x, p) => `<label class="chk"><input type="checkbox" data-t="web_featured" data-id="${p.id}" ${x ? 'checked' : ''}></label>` },
           { k: 'web_new', t: 'جديد', f: (x, p) => `<label class="chk"><input type="checkbox" data-t="web_new" data-id="${p.id}" ${x ? 'checked' : ''}></label>` },
-          { k: 'id', t: '', cls: 'act', f: (x) => `<button class="btn sm" data-ed="${x}">${icon('edit', 14)} الصور والوصف</button>` },
-        ], list, { empty: 'لا توجد أصناف' });
+          { k: 'id', t: 'الحالة', f: (x, p) => { const m = missing(p); return m.length ? `<span class="tag warn" title="ينقص: ${m.join('، ')}">ينقص ${m.join('، ')}</span>` : '<span class="tag ok">مكتمل</span>'; } },
+          { k: 'id', t: '', cls: 'act', f: (x) => `<button class="btn sm" data-ed="${x}">${icon('edit', 14)} تعديل</button>` },
+        ], list, { empty: 'لا توجد أصناف مطابقة' });
         Q.$$('#list [data-t]').forEach((c) => (c.onchange = async () => {
           try { await Q.put('/web/products/' + c.dataset.id, { [c.dataset.t]: c.checked }); rows.find((r) => r.id == c.dataset.id)[c.dataset.t] = c.checked ? 1 : 0; } catch (e) { Q.err(e); c.checked = !c.checked; }
         }));
-        Q.$$('#list [data-ed]').forEach((b) => (b.onclick = () => editWeb(rows.find((r) => r.id == b.dataset.ed), load)));
+        Q.$$('#list [data-s]').forEach((c) => (c.onchange = () => { const id = Number(c.dataset.s); c.checked ? sel.add(id) : sel.delete(id); drawBulk(); }));
+        const all = Q.$('#all'); if (all) all.onchange = () => { list.forEach((p) => (all.checked ? sel.add(p.id) : sel.delete(p.id))); draw(); };
+        Q.$$('#list [data-ed]').forEach((b) => (b.onclick = () => { const i = list.findIndex((r) => r.id == b.dataset.ed); editWeb(list, i, load); }));
+        drawBulk();
       };
       Q.$('#q').oninput = Q.debounce((e) => { st.q = e.target.value; draw(); }, 150);
+      Q.$('#fc').onchange = (e) => { st.cat = e.target.value; draw(); };
+      Q.$('#fb').onchange = (e) => { st.brand = e.target.value; draw(); };
       Q.$$('#ff button').forEach((b) => (b.onclick = () => { st.f = b.dataset.f; Q.$$('#ff button').forEach((x) => x.classList.toggle('on', x === b)); draw(); }));
       Q.$('#pa').onclick = async () => {
         const ids = rows.filter((p) => p.stock > 0 && !p.web_published).map((p) => p.id);
@@ -158,14 +214,14 @@
   });
 
   // ضغط الصورة قبل الرفع (حد 1400 بكسل) لسرعة الموقع
-  ERP.pickImages = (multiple = true) => new Promise((resolve) => {
+  ERP.pickImages = (multiple = true, max = 1400) => new Promise((resolve) => {
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = multiple;
     inp.onchange = async () => {
       const out = [];
       for (const file of inp.files) {
         try {
           const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = URL.createObjectURL(file); });
-          const k = Math.min(1, 1400 / Math.max(img.width, img.height));
+          const k = Math.min(1, max / Math.max(img.width, img.height));
           const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
           const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
           const r = await Q.post('/web/media', { data: c.toDataURL('image/jpeg', 0.86) });
@@ -177,39 +233,220 @@
     inp.click();
   });
 
-  function editWeb(p, after) {
+  // نافذة تعديل المنتج في الموقع — مع التنقل للتالي/السابق لإدخال سريع
+  function editWeb(list, idx, after) {
+    const p = list[idx];
     let imgs = [...p.web_images];
     const m = Q.modal({
-      title: 'المنتج في الموقع: ' + p.name, width: 640,
-      body: `<div class="sec-t">الصور <span class="faint">(الأولى هي الرئيسية — اسحب للترتيب)</span></div><div id="ims" class="row wrap" style="gap:8px"></div>
-        <div class="sec-t">الوصف</div><textarea class="input" id="wd" style="min-height:120px" placeholder="وصف المنتج، المكونات، طريقة الاستخدام، الحجم…">${esc(p.web_description || '')}</textarea>
-        <div class="fgrid" style="margin-top:12px"><label class="f"><span>السعر قبل الخصم (اختياري)</span><input class="input num" type="number" id="wc" value="${p.web_compare_price || ''}" placeholder="مثال: ${fmt(p.price * 1.2, 0)}"><small class="faint">يظهر مشطوباً مع نسبة الخصم. سعر البيع الحالي ${fmt(p.price)}</small></label>
+      title: 'المنتج في الموقع', width: 760,
+      body: `<div class="card card-b" style="display:flex;gap:14px;align-items:center;background:var(--bg-2,#f7f7f8);margin-bottom:12px">
+          ${thumb(imgs[0], 54, 8)}<div style="flex:1;min-width:0"><b style="font-size:15px">${esc(p.name)}</b>
+          <div class="faint">من المتجر تلقائياً: السعر <b>${fmt(p.price)}</b> · المتاح <b>${Q.qty(Math.max(0, p.stock - p.reserved))}</b>${p.barcode ? ` · الباركود ${esc(p.barcode)}` : ''}${p.category ? ` · تصنيف المخزون: ${esc(p.category)}` : ''}</div></div>
+          <span class="faint">${idx + 1} / ${list.length}</span></div>
+        <div class="fgrid c3">
+          <label class="f"><span>القسم الرئيسي</span><select class="input" id="wcat">${opts(mains(), p.web_cat_id, '— اختر —')}</select></label>
+          <label class="f"><span>القسم الفرعي</span><select class="input" id="wsub"></select></label>
+          <label class="f"><span>البراند</span><div class="row" style="gap:6px"><select class="input" id="wbr" style="flex:1">${opts(TAX.brands, p.web_brand_id, '— بدون —')}</select><button class="btn icon" id="nbr" title="براند جديد">${icon('plus', 14)}</button></div></label>
+        </div>
+        <div class="sec-t">الصور <span class="faint">(الأولى هي الرئيسية — اسحب للترتيب، حتى 10 صور)</span></div><div id="ims" class="row wrap" style="gap:8px"></div>
+        <div class="sec-t">الوصف</div><textarea class="input" id="wd" style="min-height:130px" placeholder="وصف المنتج، المكونات، طريقة الاستخدام، الحجم…">${esc(p.web_description || '')}</textarea>
+        <div class="fgrid" style="margin-top:12px"><label class="f"><span>السعر قبل الخصم (اختياري)</span><input class="input num" type="number" id="wc" value="${p.web_compare_price || ''}" placeholder="مثال: ${fmt(p.price * 1.2, 0)}"><small class="faint">يظهر مشطوباً مع نسبة الخصم</small></label>
         <div class="chk-list" style="align-self:center"><label class="chk"><input type="checkbox" id="wp" ${p.web_published ? 'checked' : ''}> منشور في الموقع</label><label class="chk"><input type="checkbox" id="wf" ${p.web_featured ? 'checked' : ''}> مميز</label><label class="chk"><input type="checkbox" id="wn" ${p.web_new ? 'checked' : ''}> وصل حديثاً</label></div></div>`,
-      foot: '<button class="btn primary" data-ok>حفظ</button><button class="btn" data-c>إلغاء</button>',
+      foot: `<button class="btn primary" data-ok>حفظ</button>${idx < list.length - 1 ? '<button class="btn" data-next>حفظ والتالي ←</button>' : ''}${idx > 0 ? '<button class="btn" data-prev>→ السابق</button>' : ''}<button class="btn" data-c>إلغاء</button>`,
     });
+    const fillSub = (sel) => { const s = subsOf(m.$('#wcat').value); m.$('#wsub').innerHTML = opts(s, sel, s.length ? '— بدون —' : 'لا توجد أقسام فرعية'); m.$('#wsub').disabled = !s.length; };
+    fillSub(p.web_sub_id);
+    m.$('#wcat').onchange = () => fillSub(null);
+    m.$('#nbr').onclick = async () => {
+      const name = prompt('اسم البراند الجديد'); if (!name || !name.trim()) return;
+      try { const b = await Q.post('/web/brands', { name: name.trim() }); TAX.brands.push(b); m.$('#wbr').innerHTML = opts(TAX.brands, b.id, '— بدون —'); } catch (e) { Q.err(e); }
+    };
     let dragI = null;
     const draw = () => {
       m.$('#ims').innerHTML = imgs.map((f, i) => `<div draggable="true" data-i="${i}" style="position:relative;width:96px;height:96px;border:1px solid var(--line);border-radius:6px;overflow:hidden;cursor:grab;${i === 0 ? 'outline:2px solid var(--accent)' : ''}">
           <img src="/media/${f}" style="width:100%;height:100%;object-fit:cover"><button class="btn sm icon" data-rm="${i}" style="position:absolute;top:3px;left:3px;width:24px;height:24px;background:#fffd">${icon('x', 12)}</button></div>`).join('')
-        + `<button class="btn" id="add" style="width:96px;height:96px;justify-content:center;flex-direction:column">${icon('plus', 18)}<span style="font-size:11px">إضافة صور</span></button>`;
+        + (imgs.length < 10 ? `<button class="btn" id="add" style="width:96px;height:96px;justify-content:center;flex-direction:column">${icon('plus', 18)}<span style="font-size:11px">إضافة صور</span></button>` : '');
       m.$$('[data-rm]').forEach((b) => (b.onclick = () => { imgs.splice(b.dataset.rm, 1); draw(); }));
       m.$$('[draggable]').forEach((el) => {
         el.ondragstart = () => (dragI = Number(el.dataset.i));
         el.ondragover = (e) => e.preventDefault();
         el.ondrop = () => { const to = Number(el.dataset.i); const [x] = imgs.splice(dragI, 1); imgs.splice(to, 0, x); draw(); };
       });
-      m.$('#add').onclick = async () => { const n = await ERP.pickImages(true); imgs.push(...n); imgs = imgs.slice(0, 10); draw(); };
+      const add = m.$('#add'); if (add) add.onclick = async () => { const n = await ERP.pickImages(true); imgs.push(...n); imgs = imgs.slice(0, 10); draw(); };
     };
     draw();
-    m.$('[data-c]').onclick = m.close;
-    m.$('[data-ok]').onclick = async () => {
-      try {
-        await Q.put('/web/products/' + p.id, { web_images: imgs, web_description: m.$('#wd').value, web_compare_price: Number(m.$('#wc').value) || null,
-          web_published: m.$('#wp').checked, web_featured: m.$('#wf').checked, web_new: m.$('#wn').checked });
-        m.close(); Q.toast('تم الحفظ — يُنشر في الموقع مع المزامنة القادمة', 'ok'); after?.();
-      } catch (e) { Q.err(e); }
+    const save = async () => {
+      await Q.put('/web/products/' + p.id, { web_images: imgs, web_description: m.$('#wd').value, web_compare_price: Number(m.$('#wc').value) || null,
+        web_published: m.$('#wp').checked, web_featured: m.$('#wf').checked, web_new: m.$('#wn').checked,
+        web_cat_id: Number(m.$('#wcat').value) || null, web_sub_id: Number(m.$('#wsub').value) || null, web_brand_id: Number(m.$('#wbr').value) || null });
+      Object.assign(p, { web_images: imgs, web_description: m.$('#wd').value, web_cat_id: Number(m.$('#wcat').value) || null, web_sub_id: Number(m.$('#wsub').value) || null,
+        web_brand_id: Number(m.$('#wbr').value) || null, web_compare_price: Number(m.$('#wc').value) || null, web_published: m.$('#wp').checked ? 1 : 0, web_featured: m.$('#wf').checked ? 1 : 0, web_new: m.$('#wn').checked ? 1 : 0 });
     };
+    m.$('[data-c]').onclick = () => { m.close(); after?.(); };
+    m.$('[data-ok]').onclick = async () => { try { await save(); m.close(); Q.toast('تم الحفظ — يظهر في الموقع خلال ثوانٍ', 'ok'); after?.(); } catch (e) { Q.err(e); } };
+    const nx = m.$('[data-next]'); if (nx) nx.onclick = async () => { try { await save(); m.close(); editWeb(list, idx + 1, after); } catch (e) { Q.err(e); } };
+    const pv = m.$('[data-prev]'); if (pv) pv.onclick = async () => { try { await save(); m.close(); editWeb(list, idx - 1, after); } catch (e) { Q.err(e); } };
   }
+
+  // ===== إدارة الأقسام (رئيسي ← فرعي) والبراندات =====
+  ERP.page('/web/catalog', {
+    title: 'أقسام الموقع والبراندات',
+    async render(v) {
+      ERP.head('أقسام الموقع والبراندات', 'أقسام رئيسية وفرعية خاصة بالموقع، والبراندات — تظهر للزبائن للتصفح والتصفية');
+      v.innerHTML = `<div class="set-grid half"><div class="card"><div class="card-h"><b>الأقسام</b><span class="sp"></span><button class="btn sm primary" id="ac">${icon('plus', 14)} قسم رئيسي</button></div><div id="cats"></div></div>
+        <div class="card"><div class="card-h"><b>البراندات</b><span class="sp"></span><button class="btn sm primary" id="ab">${icon('plus', 14)} براند</button></div><div id="brs"></div></div></div>`;
+      const draw = async () => {
+        await loadTax();
+        const row = (c, sub) => `<div class="row" style="gap:10px;align-items:center;padding:8px 14px;border-top:1px solid var(--line);${sub ? 'padding-inline-start:46px;background:var(--bg-2,#fafafa)' : ''}">
+          ${thumb(c.image, sub ? 30 : 40)}<div style="flex:1;min-width:0"><b>${sub ? '↳ ' : ''}${esc(c.name)}</b><div class="faint">${c.n} صنف · ${c.pub} منشور${c.sort ? ` · ترتيب ${c.sort}` : ''}</div></div>
+          ${sub ? '' : `<button class="btn sm" data-addsub="${c.id}">${icon('plus', 12)} فرعي</button>`}<button class="btn sm" data-ec="${c.id}">${icon('edit', 12)}</button><button class="btn sm" data-dc="${c.id}">${icon('trash', 12)}</button></div>`;
+        Q.$('#cats').innerHTML = mains().length ? mains().map((c) => row(c) + subsOf(c.id).map((s) => row(s, true)).join('')).join('') : '<div class="empty">لا توجد أقسام بعد</div>';
+        Q.$('#brs').innerHTML = TAX.brands.length ? TAX.brands.map((b) => `<div class="row" style="gap:10px;align-items:center;padding:8px 14px;border-top:1px solid var(--line)">${thumb(b.logo, 40, 20)}
+          <div style="flex:1"><b>${esc(b.name)}</b><div class="faint">${b.n} صنف</div></div><button class="btn sm" data-eb="${b.id}">${icon('edit', 12)}</button><button class="btn sm" data-db="${b.id}">${icon('trash', 12)}</button></div>`).join('') : '<div class="empty">لا توجد براندات بعد</div>';
+        Q.$$('[data-ec]').forEach((b) => (b.onclick = () => editCat(TAX.categories.find((c) => c.id == b.dataset.ec))));
+        Q.$$('[data-addsub]').forEach((b) => (b.onclick = () => editCat({ parent_id: Number(b.dataset.addsub) })));
+        Q.$$('[data-dc]').forEach((b) => (b.onclick = async () => {
+          const c = TAX.categories.find((x) => x.id == b.dataset.dc);
+          if (!(await Q.confirm(`حذف القسم «${c.name}»${c.parent_id ? '' : ' وأقسامه الفرعية'}؟ الأصناف لن تُحذف، فقط تُزال من هذا القسم.`))) return;
+          try { await Q.del('/web/categories/' + c.id); draw(); } catch (e) { Q.err(e); }
+        }));
+        Q.$$('[data-eb]').forEach((b) => (b.onclick = () => editBrand(TAX.brands.find((x) => x.id == b.dataset.eb))));
+        Q.$$('[data-db]').forEach((b) => (b.onclick = async () => {
+          const x = TAX.brands.find((y) => y.id == b.dataset.db);
+          if (!(await Q.confirm(`حذف البراند «${x.name}»؟ الأصناف لن تُحذف.`))) return;
+          try { await Q.del('/web/brands/' + x.id); draw(); } catch (e) { Q.err(e); }
+        }));
+      };
+      const imgModal = ({ title, item, imgKey, round, save }) => {
+        let img = item[imgKey] || null;
+        const m = Q.modal({
+          title, width: 460,
+          body: `<div class="fgrid"><label class="f full"><span>الاسم *</span><input class="input" id="n" value="${esc(item.name || '')}"></label>
+            <label class="f"><span>الترتيب</span><input class="input num" type="number" id="s" value="${item.sort || 0}"><small class="faint">الأصغر يظهر أولاً</small></label>
+            <div class="f"><span>الصورة</span><div class="row" style="gap:8px;align-items:center"><span id="im"></span><button class="btn sm" id="pk">اختيار</button><button class="btn sm" id="rmv">إزالة</button></div></div></div>`,
+          foot: '<button class="btn primary" data-ok>حفظ</button><button class="btn" data-c>إلغاء</button>',
+        });
+        const di = () => { m.$('#im').innerHTML = thumb(img, 48, round ? 24 : 8); };
+        di();
+        m.$('#pk').onclick = async () => { const [n] = await ERP.pickImages(false, 800); if (n) { img = n; di(); } };
+        m.$('#rmv').onclick = () => { img = null; di(); };
+        m.$('[data-c]').onclick = m.close;
+        m.$('[data-ok]').onclick = async () => { try { await save({ name: m.$('#n').value, sort: Number(m.$('#s').value) || 0, [imgKey]: img }); m.close(); draw(); } catch (e) { Q.err(e); } };
+        setTimeout(() => m.$('#n').focus(), 50);
+      };
+      const editCat = (c) => imgModal({ title: c.id ? 'تعديل القسم' : c.parent_id ? `قسم فرعي في «${catName(c.parent_id)}»` : 'قسم رئيسي جديد', item: c, imgKey: 'image',
+        save: (b) => (c.id ? Q.put('/web/categories/' + c.id, b) : Q.post('/web/categories', { ...b, parent_id: c.parent_id || null })) });
+      const editBrand = (b) => imgModal({ title: b.id ? 'تعديل البراند' : 'براند جديد', item: b, imgKey: 'logo', round: true,
+        save: (x) => (b.id ? Q.put('/web/brands/' + b.id, x) : Q.post('/web/brands', x)) });
+      Q.$('#ac').onclick = () => editCat({});
+      Q.$('#ab').onclick = () => editBrand({});
+      draw();
+    },
+  });
+
+  // ===== بنرات الموقع =====
+  const PLACES = { hero: ['السلايدر الرئيسي', 'أعلى الصفحة الرئيسية — يتبدل تلقائياً', 'كمبيوتر 2400×800 · هاتف 1080×740'], mid: ['بنر عريض', 'وسط الصفحة الرئيسية بعد المختارات', 'كمبيوتر 2000×500 · هاتف 1080×540'], tiles: ['بطاقات ترويجية', 'مربعات صغيرة بعد العروض (2 أو 4 بجانب بعض)', 'مربعة 1000×1000'] };
+  const LINKS = [['none', 'بدون رابط'], ['offers', 'صفحة العروض'], ['new', 'وصل حديثاً'], ['shop', 'كل المنتجات'], ['category', 'قسم'], ['brand', 'براند'], ['product', 'منتج'], ['url', 'رابط مخصص']];
+  ERP.page('/web/banners', {
+    title: 'بنرات الموقع',
+    async render(v) {
+      ERP.head('بنرات الموقع', 'صور ترويجية احترافية للصفحة الرئيسية — مع صورة خاصة للهاتف وجدولة تلقائية', `<button class="btn primary" id="nb">${icon('plus')} بنر جديد</button>`);
+      let rows = [], prods = [];
+      const today = new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+      const state = (b) => !b.active ? ['متوقف', ''] : b.ends && b.ends < today ? ['منتهي', 'err'] : b.starts && b.starts > today ? ['مجدول', 'info'] : ['يظهر الآن', 'ok'];
+      const linkText = (b) => {
+        const l = LINKS.find((x) => x[0] === b.link_type)?.[1] || '';
+        if (b.link_type === 'category') return `قسم: ${catName(b.link_value) || '؟'}`;
+        if (b.link_type === 'brand') return `براند: ${brandName(b.link_value) || '؟'}`;
+        if (b.link_type === 'product') return `منتج: ${prods.find((p) => p.id == b.link_value)?.name || '؟'}`;
+        if (b.link_type === 'url') return b.link_value;
+        return l;
+      };
+      const draw = () => {
+        v.innerHTML = Object.entries(PLACES).map(([k, [t, d, sz]]) => {
+          const list = rows.filter((b) => b.place === k);
+          return `<div class="card" style="margin-bottom:14px"><div class="card-h"><b>${t}</b><span class="faint">${d} · المقاس المقترح: ${sz}</span><span class="sp"></span><button class="btn sm" data-new="${k}">${icon('plus', 14)} إضافة</button></div>
+            ${list.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(${k === 'tiles' ? 190 : 300}px,1fr));gap:12px;padding:14px" data-place="${k}">${list.map((b) => { const [stt, cls] = state(b); return `<div draggable="true" data-id="${b.id}" style="border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff;cursor:grab">
+              <div style="position:relative;aspect-ratio:${k === 'hero' ? '3/1' : k === 'mid' ? '4/1' : '1/1'};background:var(--line-2)"><img src="/media/${b.image}" style="width:100%;height:100%;object-fit:cover;${b.active ? '' : 'filter:grayscale(1);opacity:.6'}">
+                ${b.title ? `<div style="position:absolute;inset:auto 0 0 0;padding:8px 10px;background:linear-gradient(transparent,#0009);color:#fff;font-weight:600;font-size:13px">${esc(b.title)}</div>` : ''}
+                <span class="tag ${cls}" style="position:absolute;top:6px;right:6px">${stt}</span>${b.image_m ? `<span class="tag" style="position:absolute;top:6px;left:6px">${icon('phone', 11)} صورة هاتف</span>` : ''}</div>
+              <div style="padding:8px 10px;display:flex;align-items:center;gap:6px"><div style="flex:1;min-width:0;font-size:12px" class="faint">${esc(linkText(b))}${b.starts || b.ends ? `<br>${b.starts || '…'} ← ${b.ends || '…'}` : ''}</div>
+                <label class="chk" title="ظاهر"><input type="checkbox" data-act="${b.id}" ${b.active ? 'checked' : ''}></label><button class="btn sm" data-ed="${b.id}">${icon('edit', 12)}</button><button class="btn sm" data-del="${b.id}">${icon('trash', 12)}</button></div></div>`; }).join('')}</div>`
+            : `<div class="empty" style="padding:22px">لا توجد بنرات — ${k === 'hero' ? 'سيظهر الغلاف الافتراضي من إعدادات محتوى الموقع' : 'هذا القسم لن يظهر في الموقع'}</div>`}</div>`;
+        }).join('') + `<div class="faint" style="font-size:12px">اسحب البنرات لتغيير ترتيبها. التغييرات تظهر في الموقع خلال ثوانٍ.</div>`;
+        Q.$$('[data-new]').forEach((b) => (b.onclick = () => edit({ place: b.dataset.new, active: 1, link_type: 'none', theme: 'dark' })));
+        Q.$$('[data-ed]').forEach((b) => (b.onclick = () => edit(rows.find((r) => r.id == b.dataset.ed))));
+        Q.$$('[data-del]').forEach((b) => (b.onclick = async () => { if (!(await Q.confirm('حذف هذا البنر؟'))) return; try { await Q.del('/web/banners/' + b.dataset.del); load(); } catch (e) { Q.err(e); } }));
+        Q.$$('[data-act]').forEach((c) => (c.onchange = async () => { const b = rows.find((r) => r.id == c.dataset.act); try { await Q.put('/web/banners/' + b.id, { ...b, active: c.checked }); load(); } catch (e) { Q.err(e); c.checked = !c.checked; } }));
+        let drag = null;
+        Q.$$('[data-place] [draggable]').forEach((el) => {
+          el.ondragstart = () => { drag = el; };
+          el.ondragover = (e) => { e.preventDefault(); };
+          el.ondrop = async (e) => {
+            e.preventDefault(); if (!drag || drag === el || drag.parentElement !== el.parentElement) return;
+            const box = el.parentElement, items = [...box.children];
+            box.insertBefore(drag, items.indexOf(drag) < items.indexOf(el) ? el.nextSibling : el);
+            try { await Q.post('/web/banners/order', { ids: [...box.children].map((x) => Number(x.dataset.id)) }); load(); } catch (er) { Q.err(er); }
+          };
+        });
+      };
+      const load = async () => { [rows] = await Promise.all([Q.get('/web/banners'), loadTax()]); draw(); };
+      const edit = async (b) => {
+        if (!prods.length) prods = await Q.get('/web/products');
+        let img = b.image || null, imgM = b.image_m || null;
+        const m = Q.modal({
+          title: b.id ? 'تعديل البنر' : 'بنر جديد', width: 720,
+          body: `<div class="fgrid">
+              <label class="f"><span>المكان</span><select class="input" id="pl">${Object.entries(PLACES).map(([k, [t]]) => `<option value="${k}" ${b.place === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+              <label class="f"><span>لون النص</span><select class="input" id="th"><option value="dark" ${b.theme !== 'light' ? 'selected' : ''}>نص أبيض (صورة داكنة)</option><option value="light" ${b.theme === 'light' ? 'selected' : ''}>نص داكن (صورة فاتحة)</option></select></label>
+            </div>
+            <div class="sec-t">الصور <span class="faint" id="sz"></span></div>
+            <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap">
+              <div><div class="faint" style="font-size:12px;margin-bottom:4px">صورة الكمبيوتر *</div><div id="pi"></div><div class="row" style="gap:6px;margin-top:6px"><button class="btn sm" id="pk">اختيار</button></div></div>
+              <div><div class="faint" style="font-size:12px;margin-bottom:4px">صورة الهاتف (اختياري — أوضح على الشاشات الصغيرة)</div><div id="pm"></div><div class="row" style="gap:6px;margin-top:6px"><button class="btn sm" id="pkm">اختيار</button><button class="btn sm" id="rmm">إزالة</button></div></div>
+            </div>
+            <div class="sec-t">النص على البنر <span class="faint">(اختياري — اتركه فارغاً إن كان التصميم يحتوي النص)</span></div>
+            <div class="fgrid"><label class="f"><span>العنوان</span><input class="input" id="tt" maxlength="120" value="${esc(b.title || '')}" placeholder="مثال: خصومات الشتاء حتى 40٪"></label>
+              <label class="f"><span>نص الزر</span><input class="input" id="ct" maxlength="40" value="${esc(b.cta || '')}" placeholder="مثال: تسوّقي الآن"></label>
+              <label class="f full"><span>وصف قصير</span><input class="input" id="st" maxlength="240" value="${esc(b.subtitle || '')}"></label></div>
+            <div class="sec-t">عند الضغط على البنر</div>
+            <div class="fgrid"><label class="f"><span>يذهب إلى</span><select class="input" id="lt">${LINKS.map(([k, l]) => `<option value="${k}" ${b.link_type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label><label class="f" id="lvw"><span>الوجهة</span><span id="lvb"></span></label></div>
+            <div class="sec-t">الجدولة</div>
+            <div class="fgrid c3"><label class="f"><span>يبدأ من</span><input class="input" type="date" id="sd" value="${b.starts || ''}"></label><label class="f"><span>ينتهي في</span><input class="input" type="date" id="ed" value="${b.ends || ''}"></label>
+              <label class="chk" style="align-self:end;height:32px"><input type="checkbox" id="ac" ${b.active !== 0 ? 'checked' : ''}> ظاهر في الموقع</label></div>`,
+          foot: '<button class="btn primary" data-ok>حفظ</button><button class="btn" data-c>إلغاء</button>',
+        });
+        const ratio = () => ({ hero: '3/1', mid: '4/1', tiles: '1/1' }[m.$('#pl').value]);
+        const di = () => {
+          const box = (f, w, r) => (f ? `<img src="/media/${f}" style="width:${w}px;aspect-ratio:${r};object-fit:cover;border-radius:6px;border:1px solid var(--line);display:block">` : `<div style="width:${w}px;aspect-ratio:${r};border-radius:6px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--faint);font-size:12px">لا توجد صورة</div>`);
+          m.$('#pi').innerHTML = box(img, 320, ratio());
+          m.$('#pm').innerHTML = box(imgM, 150, m.$('#pl').value === 'tiles' ? '1/1' : '3/2');
+          m.$('#sz').textContent = '— المقاس المقترح: ' + PLACES[m.$('#pl').value][2];
+        };
+        const lv = () => {
+          const t = m.$('#lt').value, val = b.link_type === t ? b.link_value : '';
+          m.$('#lvw').style.display = ['category', 'brand', 'product', 'url'].includes(t) ? '' : 'none';
+          m.$('#lvb').innerHTML = t === 'category' ? `<select class="input" id="lv">${mains().map((c) => `<option value="${c.id}" ${c.id == val ? 'selected' : ''}>${esc(c.name)}</option>` + subsOf(c.id).map((s) => `<option value="${s.id}" ${s.id == val ? 'selected' : ''}>&nbsp;&nbsp;↳ ${esc(s.name)}</option>`).join('')).join('')}</select>`
+            : t === 'brand' ? `<select class="input" id="lv">${TAX.brands.map((x) => `<option value="${x.id}" ${x.id == val ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`
+            : t === 'product' ? `<select class="input" id="lv">${prods.filter((p) => p.web_published).map((p) => `<option value="${p.id}" ${p.id == val ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`
+            : t === 'url' ? `<input class="input" id="lv" dir="ltr" placeholder="https://… أو /shop?q=…" value="${esc(val || '')}">` : '';
+        };
+        di(); lv();
+        m.$('#pl').onchange = di; m.$('#lt').onchange = lv;
+        m.$('#pk').onclick = async () => { const [n] = await ERP.pickImages(false, 2400); if (n) { img = n; di(); } };
+        m.$('#pkm').onclick = async () => { const [n] = await ERP.pickImages(false, 1200); if (n) { imgM = n; di(); } };
+        m.$('#rmm').onclick = () => { imgM = null; di(); };
+        m.$('[data-c]').onclick = m.close;
+        m.$('[data-ok]').onclick = async () => {
+          const body = { place: m.$('#pl').value, theme: m.$('#th').value, image: img, image_m: imgM, title: m.$('#tt').value, subtitle: m.$('#st').value, cta: m.$('#ct').value,
+            link_type: m.$('#lt').value, link_value: m.$('#lv')?.value || null, starts: m.$('#sd').value || null, ends: m.$('#ed').value || null, active: m.$('#ac').checked, sort: b.sort || 99 };
+          try { await (b.id ? Q.put('/web/banners/' + b.id, body) : Q.post('/web/banners', body)); m.close(); Q.toast('تم الحفظ — يظهر في الموقع خلال ثوانٍ', 'ok'); load(); } catch (e) { Q.err(e); }
+        };
+      };
+      Q.$('#nb').onclick = () => edit({ place: 'hero', active: 1, link_type: 'none', theme: 'dark' });
+      load();
+    },
+  });
 
   // ===== إعدادات الموقع والمحتوى =====
   const GOVS = ['بغداد', 'البصرة', 'نينوى', 'أربيل', 'النجف', 'كربلاء', 'بابل', 'الأنبار', 'ديالى', 'ذي قار', 'كركوك', 'صلاح الدين', 'السليمانية', 'دهوك', 'واسط', 'ميسان', 'القادسية', 'المثنى', 'حلبجة'];
@@ -271,7 +508,7 @@
       Q.$('#hrm').onclick = () => { hero = ''; drawHero(); };
       const showState = async () => {
         const st = await Q.get('/web/status');
-        Q.$('#cs').innerHTML = st.configured ? (st.last_error ? '<span class="tag err">خطأ</span>' : st.last_ok ? '<span class="tag ok">متصل</span>' : '<span class="tag">لم يُختبر</span>') : '<span class="tag warn">غير مربوط</span>';
+        Q.$('#cs').innerHTML = st.configured ? (st.last_error ? '<span class="tag err">خطأ</span>' : st.live ? '<span class="tag ok">متصل مباشرة</span>' : st.last_ok ? '<span class="tag ok">متصل</span>' : '<span class="tag">لم يُختبر</span>') : '<span class="tag warn">غير مربوط</span>';
         Q.$('#sst').innerHTML = `المنتجات المنشورة: <b>${st.published}</b><br>آخر مزامنة ناجحة: <b>${st.last_ok ? Q.dt(st.last_ok) : '—'}</b>${st.last_report ? `<br>آخر تقرير: ${st.last_report.products} منتج، ${st.last_report.orders} طلب جديد، ${st.last_report.images} صورة` : ''}${st.last_error ? `<br><span class="err">${esc(st.last_error)}</span>` : ''}`;
       };
       showState();

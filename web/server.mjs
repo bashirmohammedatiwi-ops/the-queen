@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS ix_orders_pulled ON orders(pulled);
 `);
+const addCol = (t, c, d) => { if (!db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${d}`); };
+addCol('orders', 'token', 'TEXT');
+addCol('categories', 'parent_id', 'INTEGER');
+addCol('products', 'sub_id', 'INTEGER');
+addCol('products', 'brand_id', 'INTEGER');
+db.exec('CREATE TABLE IF NOT EXISTS brands (id INTEGER PRIMARY KEY, name TEXT NOT NULL, slug TEXT, logo TEXT, sort INTEGER DEFAULT 0)');
+for (const r of db.prepare('SELECT id FROM orders WHERE token IS NULL').all()) db.prepare('UPDATE orders SET token=? WHERE id=?').run(crypto.randomBytes(9).toString('base64url'), r.id);
 const all = (s, ...p) => db.prepare(s).all(...p);
 const get = (s, ...p) => db.prepare(s).get(...p);
 const run = (s, ...p) => db.prepare(s).run(...p);
@@ -87,7 +94,7 @@ function limit(key, max, windowMs) {
 }
 setInterval(() => { const t = Date.now(); for (const [k, v] of hits) if (!v.some((x) => t - x < 3600e3)) hits.delete(k); }, 600e3).unref();
 const keyOk = (req) => SYNC_KEY.length >= 24 && crypto.timingSafeEqual(crypto.createHash('sha256').update(String(req.headers['x-sync-key'] || '')).digest(), crypto.createHash('sha256').update(SYNC_KEY).digest());
-const productOut = (p) => ({ id: p.id, slug: p.slug, name: p.name, category_id: p.category_id, price: p.price, compare_price: p.compare_price || null,
+const productOut = (p) => ({ id: p.id, slug: p.slug, name: p.name, category_id: p.category_id, sub_id: p.sub_id || null, brand_id: p.brand_id || null, price: p.price, compare_price: p.compare_price || null,
   in_stock: p.stock > 0, low_stock: p.stock > 0 && p.stock <= 3, unit: p.unit, description: p.description || '', images: JSON.parse(p.images || '[]'),
   featured: !!p.featured, is_new: !!p.is_new });
 const slugify = (s, id) => (String(s).trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'p') + '-' + id;
@@ -97,30 +104,77 @@ const normPhone = (p) => {
   if (d.length === 10 && d.startsWith('7')) d = '0' + d;
   return d;
 };
+// ===== التحديث المباشر (SSE) =====
+// زوار الموقع: تحديث الأسعار والمخزون وحالة الطلب فوراً — النظام الإداري: إشعار فوري بالطلبات الجديدة
+const live = new Set(), syncLive = new Set();
+let liveSeq = 0;
+function emit(set, type, data = {}) {
+  const msg = `event: ${type}\ndata: ${JSON.stringify({ ...data, seq: ++liveSeq })}\n\n`;
+  for (const c of set) { try { c.write(msg); } catch { set.delete(c); } }
+}
+setInterval(() => { for (const set of [live, syncLive]) for (const c of set) { try { c.write(': ping\n\n'); } catch { set.delete(c); } } }, 25000).unref();
+function openStream(req, res, set, max) {
+  const ip = clientIp(req);
+  const mine = [...set].filter((c) => c.ip === ip).length;
+  if (set.size >= max || mine >= 8) { res.writeHead(503, { 'Retry-After': '30' }); return res.end(); }
+  res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.write('retry: 4000\n\n');
+  res.ip = ip; set.add(res);
+  req.on('close', () => set.delete(res));
+}
+const hashOf = (v) => crypto.createHash('sha1').update(JSON.stringify(v)).digest('hex');
+const lastHash = {};
 const STATUS = { new: 'تم استلام الطلب', confirmed: 'تم تأكيد الطلب', shipping: 'الطلب في الطريق إليكِ', delivered: 'تم التسليم', cancelled: 'تم إلغاء الطلب' };
 
 // ===== الواجهة العامة =====
 const routes = [];
 const R = (method, pattern, fn, auth = false) => routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), fn, auth });
 
+// البنرات: تُحل روابطها هنا وتُعرض فقط ضمن فترة الجدولة (بتوقيت بغداد)
+function liveBanners(list) {
+  const today = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+  const okImg = (x) => (x && /^[a-f0-9]{40}\.(jpg|webp|png)$/.test(x) ? x : null);
+  return (Array.isArray(list) ? list : []).filter((b) => b && okImg(b.image) && (!b.starts || b.starts <= today) && (!b.ends || b.ends >= today)).map((b) => {
+    let link = '';
+    const v = b.link_value;
+    if (b.link_type === 'category') { const c = get('SELECT slug FROM categories WHERE id=?', Number(v)); link = c ? '/c/' + encodeURIComponent(c.slug) : ''; }
+    else if (b.link_type === 'brand') { const x = get('SELECT slug FROM brands WHERE id=?', Number(v)); link = x ? '/brand/' + encodeURIComponent(x.slug) : ''; }
+    else if (b.link_type === 'product') { const x = get('SELECT slug FROM products WHERE id=?', Number(v)); link = x ? '/p/' + encodeURIComponent(x.slug) : ''; }
+    else if (b.link_type === 'offers') link = '/shop?offers=1';
+    else if (b.link_type === 'new') link = '/shop?new=1';
+    else if (b.link_type === 'shop') link = '/shop';
+    else if (b.link_type === 'url' && /^(https?:\/\/|\/)/.test(String(v || ''))) link = String(v);
+    else if (b.link) link = String(b.link);
+    return { id: b.id, place: ['hero', 'mid', 'tiles'].includes(b.place) ? b.place : 'hero', image: okImg(b.image), image_m: okImg(b.image_m), title: b.title || '', subtitle: b.subtitle || '', cta: b.cta || '', theme: b.theme === 'light' ? 'light' : 'dark', link };
+  });
+}
 R('GET', '/api/store', () => {
   const s = getSettings();
-  const cats = all(`SELECT c.id, c.name, c.slug, c.image, (SELECT COUNT(*) FROM products p WHERE p.category_id=c.id) n FROM categories c ORDER BY c.sort, c.name`).filter((c) => c.n > 0);
-  return { store: s.store, hero: s.hero, announcement: s.announcement, about: s.about, policies: s.policies, banners: s.banners,
+  const cats = all(`SELECT c.id, c.name, c.slug, c.image, c.parent_id, (SELECT COUNT(*) FROM products p WHERE p.category_id=c.id OR p.sub_id=c.id) n FROM categories c ORDER BY c.sort, c.name`).filter((c) => c.n > 0);
+  const brands = all(`SELECT b.id, b.name, b.slug, b.logo, (SELECT COUNT(*) FROM products p WHERE p.brand_id=b.id) n FROM brands b ORDER BY b.sort, b.name`).filter((b) => b.n > 0);
+  return { store: s.store, hero: s.hero, announcement: s.announcement, about: s.about, policies: s.policies, banners: liveBanners(s.banners),
     delivery: { baghdad: s.delivery.baghdad, other: s.delivery.other, free_over: s.delivery.free_over, min_order: s.delivery.min_order, fees: s.delivery.fees },
-    ordering: s.ordering, governorates: GOVERNORATES, categories: cats, count: get('SELECT COUNT(*) n FROM products').n };
+    ordering: s.ordering, governorates: GOVERNORATES, categories: cats, brands, count: get('SELECT COUNT(*) n FROM products').n };
 });
 R('GET', '/api/products', ({ q }) => {
   const w = [], p = [];
-  if (q.category) { w.push('(category_id=? OR category_id IN (SELECT id FROM categories WHERE slug=?))'); p.push(Number(q.category) || -1, q.category); }
-  if (q.q) { w.push('(name LIKE ? OR description LIKE ?)'); p.push(`%${q.q}%`, `%${q.q}%`); }
+  if (q.category) {
+    const c = get('SELECT id FROM categories WHERE id=? OR slug=?', Number(q.category) || -1, String(q.category));
+    w.push('(category_id=? OR sub_id=?)'); p.push(c ? c.id : -1, c ? c.id : -1);
+  }
+  if (q.brand) {
+    const b = get('SELECT id FROM brands WHERE id=? OR slug=?', Number(q.brand) || -1, String(q.brand));
+    w.push('brand_id=?'); p.push(b ? b.id : -1);
+  }
+  if (q.q) { w.push('(name LIKE ? OR description LIKE ? OR brand_id IN (SELECT id FROM brands WHERE name LIKE ?))'); p.push(`%${q.q}%`, `%${q.q}%`, `%${q.q}%`); }
+  if (q.ids) { const ids = String(q.ids).split(',').map(Number).filter(Boolean).slice(0, 100); w.push(`id IN (${ids.map(() => '?').join(',') || 'NULL'})`); p.push(...ids); }
   if (q.featured) w.push('featured=1');
   if (q.new) w.push('is_new=1');
   if (q.offers) w.push('compare_price > price');
   if (q.instock) w.push('stock > 0');
   if (q.min) { w.push('price >= ?'); p.push(Number(q.min) || 0); }
   if (q.max) { w.push('price <= ?'); p.push(Number(q.max) || 0); }
-  const order = { price_asc: 'price ASC', price_desc: 'price DESC', new: 'is_new DESC, updated_at DESC', name: 'name' }[q.sort] || '(stock>0) DESC, featured DESC, sort, updated_at DESC';
+  const order = { price_asc: 'price ASC', price_desc: 'price DESC', new: 'is_new DESC, id DESC', name: 'name' }[q.sort] || '(stock>0) DESC, featured DESC, sort, id DESC';
   const limitN = Math.min(Number(q.limit) || 60, 200), offset = Math.max(0, Number(q.offset) || 0);
   const where = w.length ? 'WHERE ' + w.join(' AND ') : '';
   const total = get(`SELECT COUNT(*) n FROM products ${where}`, ...p).n;
@@ -130,9 +184,12 @@ R('GET', '/api/products', ({ q }) => {
 R('GET', '/api/products/:slug', ({ params }) => {
   const p = get('SELECT * FROM products WHERE slug=? OR id=?', params.slug, Number(params.slug) || -1);
   if (!p) throw new E(404, 'المنتج غير متوفر');
-  const related = all('SELECT * FROM products WHERE category_id=? AND id<>? ORDER BY (stock>0) DESC, RANDOM() LIMIT 8', p.category_id, p.id).map(productOut);
+  const related = all(`SELECT * FROM products WHERE id<>? AND ((sub_id IS NOT NULL AND sub_id=?) OR category_id=? OR (brand_id IS NOT NULL AND brand_id=?))
+    ORDER BY (stock>0) DESC, (sub_id IS NOT NULL AND sub_id=?) DESC, RANDOM() LIMIT 10`, p.id, p.sub_id, p.category_id, p.brand_id, p.sub_id).map(productOut);
   const cat = p.category_id ? get('SELECT id, name, slug FROM categories WHERE id=?', p.category_id) : null;
-  return { ...productOut(p), category: cat, related };
+  const sub = p.sub_id ? get('SELECT id, name, slug FROM categories WHERE id=?', p.sub_id) : null;
+  const brand = p.brand_id ? get('SELECT id, name, slug, logo FROM brands WHERE id=?', p.brand_id) : null;
+  return { ...productOut(p), category: cat, sub, brand, related };
 });
 R('POST', '/api/cart/check', async ({ body }) => {
   const ids = (body.items || []).map((i) => Number(i.id)).filter(Boolean).slice(0, 100);
@@ -168,23 +225,36 @@ R('POST', '/api/orders', async ({ body, req }) => {
   const fee = deliveryFee(governorate, subtotal, s);
   const total = subtotal + fee;
   const no = 'TQ-' + String((get('SELECT COALESCE(MAX(id),0)+1 n FROM orders').n) + 10000);
-  const t = now();
+  const t = now(), token = crypto.randomBytes(9).toString('base64url');
   db.exec('BEGIN');
   try {
-    run(`INSERT INTO orders(no,created_at,status,name,phone,governorate,city,address,notes,items,subtotal,delivery_fee,total,history,updated_at,ip)
-      VALUES(?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, t, name, phone, governorate, city, address, notes, JSON.stringify(items), subtotal, fee, total,
-      JSON.stringify([{ status: 'new', at: t }]), t, ip);
+    run(`INSERT INTO orders(no,created_at,status,name,phone,governorate,city,address,notes,items,subtotal,delivery_fee,total,history,updated_at,ip,token)
+      VALUES(?,?,'new',?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, t, name, phone, governorate, city, address, notes, JSON.stringify(items), subtotal, fee, total,
+      JSON.stringify([{ status: 'new', at: t }]), t, ip, token);
     // حجز الكمية على الموقع حتى تتم المزامنة القادمة من النظام الإداري
     for (const i of items) run('UPDATE products SET stock = stock - ? WHERE id=?', i.qty, i.id);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
-  return { no, total, subtotal, delivery_fee: fee, status: 'new', status_label: STATUS.new };
+  emit(syncLive, 'order', { no });
+  emit(live, 'catalog', { ids: items.map((i) => i.id) });
+  return { no, token, total, subtotal, delivery_fee: fee, status: 'new', status_label: STATUS.new, created_at: t };
+});
+// تتبع كل طلبات الزبون برقم الهاتف فقط (بدون العنوان أو البيانات الشخصية)
+const orderPublic = (o) => ({ no: o.no, token: o.token, created_at: o.created_at, status: o.status, status_label: STATUS[o.status],
+  items: JSON.parse(o.items).map(({ id, name, qty, price, total, image }) => ({ id, name, qty, price, total, image })),
+  subtotal: o.subtotal, delivery_fee: o.delivery_fee, total: o.total, governorate: o.governorate,
+  history: JSON.parse(o.history).map((h) => ({ ...h, label: STATUS[h.status] })) });
+R('GET', '/api/orders/by-phone', ({ q, req }) => {
+  limit('phone:' + clientIp(req), 30, 10 * 60e3);
+  const phone = normPhone(q.phone);
+  if (!/^07\d{9}$/.test(phone)) throw new E(400, 'رقم الهاتف غير صحيح (مثال: 07701234567)');
+  return { orders: all('SELECT * FROM orders WHERE phone=? ORDER BY id DESC LIMIT 50', phone).map(orderPublic) };
 });
 R('GET', '/api/orders/track', ({ q, req }) => {
   limit('track:' + clientIp(req), 30, 10 * 60e3);
   const o = get('SELECT * FROM orders WHERE no=? AND phone=?', String(q.no || '').trim().toUpperCase(), normPhone(q.phone));
   if (!o) throw new E(404, 'لم يتم العثور على طلب بهذا الرقم ورقم الهاتف');
-  return { no: o.no, created_at: o.created_at, status: o.status, status_label: STATUS[o.status], items: JSON.parse(o.items).map(({ name, qty, price, total, image }) => ({ name, qty, price, total, image })),
+  return { no: o.no, token: o.token, created_at: o.created_at, status: o.status, status_label: STATUS[o.status], items: JSON.parse(o.items).map(({ name, qty, price, total, image }) => ({ name, qty, price, total, image })),
     subtotal: o.subtotal, delivery_fee: o.delivery_fee, total: o.total, history: JSON.parse(o.history).map((h) => ({ ...h, label: STATUS[h.status] })), governorate: o.governorate };
 });
 
@@ -193,26 +263,35 @@ R('GET', '/api/sync/ping', () => ({ ok: true, app: 'the-queen-web', products: ge
 R('PUT', '/api/sync/settings', ({ body }) => {
   const allowed = Object.keys(DEFAULTS);
   for (const [k, v] of Object.entries(body || {})) if (allowed.includes(k)) run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, JSON.stringify(v));
+  const h = hashOf(getSettings());
+  if (lastHash.settings && lastHash.settings !== h) emit(live, 'store');
+  lastHash.settings = h;
   return { ok: true };
 }, true);
 // استبدال كامل للكتالوج المنشور (المنتجات غير المرسلة تُحذف من الموقع)
 R('PUT', '/api/sync/catalog', ({ body }) => {
   const cats = Array.isArray(body.categories) ? body.categories : [];
   const prods = Array.isArray(body.products) ? body.products : [];
+  const h = hashOf(body), changed = lastHash.catalog !== h;
+  lastHash.catalog = h;
   db.exec('BEGIN');
   try {
+    const okImg = (x) => (x && /^[a-f0-9]{40}\.(jpg|webp|png)$/.test(x) ? x : null);
     run('DELETE FROM categories');
-    for (const c of cats) run('INSERT INTO categories(id,name,slug,sort,image) VALUES(?,?,?,?,?)', Number(c.id), String(c.name), slugify(c.name, c.id), Number(c.sort) || 0, c.image || null);
+    for (const c of cats) run('INSERT INTO categories(id,name,slug,sort,image,parent_id) VALUES(?,?,?,?,?,?)', Number(c.id), String(c.name), slugify(c.name, c.id), Number(c.sort) || 0, okImg(c.image), Number(c.parent_id) || null);
+    run('DELETE FROM brands');
+    for (const b of Array.isArray(body.brands) ? body.brands : []) run('INSERT INTO brands(id,name,slug,logo,sort) VALUES(?,?,?,?,?)', Number(b.id), String(b.name), slugify(b.name, b.id), okImg(b.logo), Number(b.sort) || 0);
     const keep = new Set();
     for (const p of prods) {
       const id = Number(p.id); if (!id) continue; keep.add(id);
       const images = JSON.stringify((Array.isArray(p.images) ? p.images : []).filter((x) => /^[a-f0-9]{40}\.(jpg|webp|png)$/.test(x)).slice(0, 10));
-      run(`INSERT INTO products(id,slug,name,category_id,price,compare_price,stock,unit,description,images,featured,is_new,sort,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, name=excluded.name, category_id=excluded.category_id,
+      run(`INSERT INTO products(id,slug,name,category_id,price,compare_price,stock,unit,description,images,featured,is_new,sort,updated_at,sub_id,brand_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, name=excluded.name, category_id=excluded.category_id, sub_id=excluded.sub_id, brand_id=excluded.brand_id,
         price=excluded.price, compare_price=excluded.compare_price, stock=excluded.stock, unit=excluded.unit, description=excluded.description,
         images=excluded.images, featured=excluded.featured, is_new=excluded.is_new, sort=excluded.sort, updated_at=excluded.updated_at`,
         id, slugify(p.name, id), String(p.name), p.category_id || null, Number(p.price) || 0, Number(p.compare_price) || null,
-        Math.max(0, Number(p.stock) || 0), p.unit || null, String(p.description || '').slice(0, 5000), images, p.featured ? 1 : 0, p.is_new ? 1 : 0, Number(p.sort) || 0, now());
+        Math.max(0, Number(p.stock) || 0), p.unit || null, String(p.description || '').slice(0, 5000), images, p.featured ? 1 : 0, p.is_new ? 1 : 0, Number(p.sort) || 0, now(),
+        Number(p.sub_id) || null, Number(p.brand_id) || null);
     }
     const existing = all('SELECT id FROM products').map((r) => r.id);
     for (const id of existing) if (!keep.has(id)) run('DELETE FROM products WHERE id=?', id);
@@ -221,6 +300,7 @@ R('PUT', '/api/sync/catalog', ({ body }) => {
       for (const i of JSON.parse(o.items)) run('UPDATE products SET stock = MAX(0, stock - ?) WHERE id=?', i.qty, i.id);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  if (changed) emit(live, 'catalog', {});
   return { ok: true, products: prods.length, categories: cats.length };
 }, true);
 R('GET', '/api/sync/media', () => ({ files: fs.readdirSync(MEDIA).filter((f) => /^[a-f0-9]{40}\./.test(f)) }), true);
@@ -253,6 +333,8 @@ R('PUT', '/api/sync/orders/:no', ({ params, body }) => {
     if (from >= 0 && to > from + 1) for (const st of flow.slice(from + 1, to)) h.push({ status: st, at: now() });
     h.push({ status: body.status, at: now() });
     run('UPDATE orders SET status=?, history=?, updated_at=? WHERE no=?', body.status, JSON.stringify(h), now(), o.no);
+    emit(live, 'order', { t: o.token, status: body.status });
+    if (body.status === 'cancelled') emit(live, 'catalog', { ids: JSON.parse(o.items).map((i) => i.id) });
   }
   return { ok: true };
 }, true);
@@ -294,6 +376,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (p.startsWith('/api/')) {
       if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+      if (p === '/api/live' && req.method === 'GET') return openStream(req, res, live, 3000);
+      if (p === '/api/sync/events' && req.method === 'GET') {
+        if (!keyOk(req)) { limit('auth:' + clientIp(req), 20, 10 * 60e3); throw new E(401, 'مفتاح المزامنة غير صحيح'); }
+        return openStream(req, res, syncLive, 20);
+      }
       for (const r of routes) {
         if (r.method !== req.method) continue;
         const m = p.match(r.re); if (!m) continue;
@@ -322,5 +409,6 @@ const server = http.createServer(async (req, res) => {
     send(res, e.status || 500, { error: e.status ? e.message : 'خطأ في الخادم' });
   }
 });
+server.requestTimeout = 0;
 server.listen(PORT, '0.0.0.0', () => console.log(`The Queen web → http://0.0.0.0:${PORT}`));
 process.on('SIGTERM', () => { server.close(); db.close(); process.exit(0); });

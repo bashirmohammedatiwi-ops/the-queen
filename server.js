@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
-import { MEDIA_DIR, saveMedia, reservedQty, syncNow, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent } from './lib/web-sync.js';
+import { MEDIA_DIR, saveMedia, reservedQty, syncNow, pushSoon, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent } from './lib/web-sync.js';
 import {
   db, all, get, run, tx, round, today, localNow, ROOT, DATA_DIR,
   getSettings, saveSettings, hashPassword, checkPassword,
@@ -21,6 +21,7 @@ const PUBLIC = path.join(ROOT, 'public');
 // ===== أحداث مباشرة (SSE) لتحديث نقطة البيع فوراً =====
 const clients = new Set();
 function broadcast(type, data = {}) {
+  if (type === 'products') pushSoon(); // الموقع يتحدث مباشرة مع أي تغيير في الأصناف أو المخزون
   const msg = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const c of clients) { try { c.write(msg); } catch { clients.delete(c); } }
 }
@@ -592,7 +593,7 @@ route('POST', '/api/web/media', ADMIN, ({ body }) => ({ name: saveMedia(body.dat
 route('GET', '/api/web/products', ADMIN, () => {
   const reserved = reservedQty();
   return all(`SELECT p.id, p.name, p.barcode, p.price, p.stock, p.unit, p.category_id, c.name category, p.web_published, p.web_description, p.web_images,
-    p.web_featured, p.web_new, p.web_compare_price FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1 ORDER BY p.name`)
+    p.web_featured, p.web_new, p.web_compare_price, p.web_cat_id, p.web_sub_id, p.web_brand_id FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1 ORDER BY p.name`)
     .map((p) => ({ ...p, web_images: JSON.parse(p.web_images || '[]'), reserved: reserved.get(p.id) || 0 }));
 });
 route('PUT', '/api/web/products/:id', ADMIN, ({ body, params }) => {
@@ -600,18 +601,125 @@ route('PUT', '/api/web/products/:id', ADMIN, ({ body, params }) => {
   if (!p) throw new HttpError(404, 'الصنف غير موجود');
   const imgs = Array.isArray(body.web_images) ? body.web_images.filter((x) => /^[a-f0-9]{40}\.(jpg|png|webp)$/.test(x)).slice(0, 10) : JSON.parse(p.web_images || '[]');
   const v = (k, d) => (k in body ? body[k] : d);
-  run(`UPDATE products SET web_published=?, web_description=?, web_images=?, web_featured=?, web_new=?, web_compare_price=? WHERE id=?`,
+  const { cat, sub } = webCatPair(v('web_cat_id', p.web_cat_id), v('web_sub_id', p.web_sub_id));
+  const brand = Number(v('web_brand_id', p.web_brand_id)) || null;
+  if (brand && !get('SELECT 1 FROM web_brands WHERE id=?', brand)) throw bad('البراند غير موجود');
+  run(`UPDATE products SET web_published=?, web_description=?, web_images=?, web_featured=?, web_new=?, web_compare_price=?, web_cat_id=?, web_sub_id=?, web_brand_id=? WHERE id=?`,
     v('web_published', p.web_published) ? 1 : 0, v('web_description', p.web_description) || null, JSON.stringify(imgs),
-    v('web_featured', p.web_featured) ? 1 : 0, v('web_new', p.web_new) ? 1 : 0, Number(v('web_compare_price', p.web_compare_price)) || null, p.id);
+    v('web_featured', p.web_featured) ? 1 : 0, v('web_new', p.web_new) ? 1 : 0, Number(v('web_compare_price', p.web_compare_price)) || null, cat, sub, brand, p.id);
+  pushSoon();
   return { ok: true };
 });
 route('POST', '/api/web/products/bulk', ADMIN, ({ body }) => {
   const ids = (body.ids || []).map(Number).filter(Boolean);
+  if (!ids.length) throw bad('لا يوجد تحديد');
+  if (body.field === 'category') {
+    const { cat, sub } = webCatPair(body.value, body.sub);
+    tx(() => { for (const id of ids) run('UPDATE products SET web_cat_id=?, web_sub_id=? WHERE id=?', cat, sub, id); });
+    pushSoon(); return { ok: true, n: ids.length };
+  }
+  if (body.field === 'brand') {
+    const b = Number(body.value) || null;
+    if (b && !get('SELECT 1 FROM web_brands WHERE id=?', b)) throw bad('البراند غير موجود');
+    tx(() => { for (const id of ids) run('UPDATE products SET web_brand_id=? WHERE id=?', b, id); });
+    pushSoon(); return { ok: true, n: ids.length };
+  }
   const field = { publish: 'web_published', featured: 'web_featured', new: 'web_new' }[body.field];
-  if (!field || !ids.length) throw bad('لا يوجد تحديد');
+  if (!field) throw bad('لا يوجد تحديد');
   tx(() => { for (const id of ids) run(`UPDATE products SET ${field}=? WHERE id=?`, body.value ? 1 : 0, id); });
+  pushSoon();
   return { ok: true, n: ids.length };
 });
+// ===== أقسام الموقع (رئيسي/فرعي) والبراندات =====
+function webCatPair(catIn, subIn) {
+  let cat = Number(catIn) || null, sub = Number(subIn) || null;
+  if (sub) {
+    const sc = get('SELECT id, parent_id FROM web_categories WHERE id=?', sub);
+    if (!sc || !sc.parent_id) throw bad('القسم الفرعي غير صحيح');
+    if (cat && cat !== sc.parent_id) throw bad('القسم الفرعي لا يتبع القسم الرئيسي المختار');
+    cat = sc.parent_id;
+  }
+  if (cat) { const c = get('SELECT parent_id FROM web_categories WHERE id=?', cat); if (!c) throw bad('القسم غير موجود'); if (c.parent_id) throw bad('اختر قسماً رئيسياً'); }
+  return { cat, sub };
+}
+const mediaName = (x) => (x && /^[a-f0-9]{40}\.(jpg|png|webp)$/.test(x) ? x : null);
+route('GET', '/api/web/taxonomy', ADMIN, () => ({
+  categories: all(`SELECT w.*, (SELECT COUNT(*) FROM products p WHERE p.active=1 AND (p.web_cat_id=w.id OR p.web_sub_id=w.id)) n,
+    (SELECT COUNT(*) FROM products p WHERE p.active=1 AND p.web_published=1 AND (p.web_cat_id=w.id OR p.web_sub_id=w.id)) pub FROM web_categories w ORDER BY w.sort, w.name`),
+  brands: all(`SELECT b.*, (SELECT COUNT(*) FROM products p WHERE p.active=1 AND p.web_brand_id=b.id) n FROM web_brands b ORDER BY b.sort, b.name`),
+}));
+route('POST', '/api/web/categories', ADMIN, ({ body }) => {
+  const name = String(body.name || '').trim(); if (!name) throw bad('اكتب اسم القسم');
+  const parent = Number(body.parent_id) || null;
+  if (parent) { const pc = get('SELECT parent_id FROM web_categories WHERE id=?', parent); if (!pc) throw bad('القسم الرئيسي غير موجود'); if (pc.parent_id) throw bad('لا يمكن إضافة قسم فرعي داخل قسم فرعي'); }
+  const id = run('INSERT INTO web_categories(name,parent_id,sort,image) VALUES(?,?,?,?)', name, parent, Number(body.sort) || 0, mediaName(body.image)).lastInsertRowid;
+  pushSoon(); return get('SELECT * FROM web_categories WHERE id=?', id);
+});
+route('PUT', '/api/web/categories/:id', ADMIN, ({ body, params }) => {
+  const c = get('SELECT * FROM web_categories WHERE id=?', params.id); if (!c) throw new HttpError(404, 'القسم غير موجود');
+  const name = String(body.name ?? c.name).trim(); if (!name) throw bad('اكتب اسم القسم');
+  run('UPDATE web_categories SET name=?, sort=?, image=? WHERE id=?', name, Number(body.sort ?? c.sort) || 0, 'image' in body ? mediaName(body.image) : c.image, c.id);
+  pushSoon(); return get('SELECT * FROM web_categories WHERE id=?', c.id);
+});
+route('DELETE', '/api/web/categories/:id', ADMIN, ({ params }) => {
+  const id = Number(params.id);
+  tx(() => {
+    const subs = all('SELECT id FROM web_categories WHERE parent_id=?', id).map((r) => r.id);
+    run('UPDATE products SET web_cat_id=NULL, web_sub_id=NULL WHERE web_cat_id=?', id);
+    for (const sid of subs) run('UPDATE products SET web_sub_id=NULL WHERE web_sub_id=?', sid);
+    run('UPDATE products SET web_sub_id=NULL WHERE web_sub_id=?', id);
+    run('DELETE FROM web_categories WHERE parent_id=?', id);
+    run('DELETE FROM web_categories WHERE id=?', id);
+  });
+  pushSoon(); return { ok: true };
+});
+route('POST', '/api/web/brands', ADMIN, ({ body }) => {
+  const name = String(body.name || '').trim(); if (!name) throw bad('اكتب اسم البراند');
+  if (get('SELECT 1 FROM web_brands WHERE name=?', name)) throw bad('البراند موجود مسبقاً');
+  const id = run('INSERT INTO web_brands(name,logo,sort) VALUES(?,?,?)', name, mediaName(body.logo), Number(body.sort) || 0).lastInsertRowid;
+  pushSoon(); return get('SELECT * FROM web_brands WHERE id=?', id);
+});
+route('PUT', '/api/web/brands/:id', ADMIN, ({ body, params }) => {
+  const b = get('SELECT * FROM web_brands WHERE id=?', params.id); if (!b) throw new HttpError(404, 'البراند غير موجود');
+  const name = String(body.name ?? b.name).trim(); if (!name) throw bad('اكتب اسم البراند');
+  if (get('SELECT 1 FROM web_brands WHERE name=? AND id<>?', name, b.id)) throw bad('البراند موجود مسبقاً');
+  run('UPDATE web_brands SET name=?, logo=?, sort=? WHERE id=?', name, 'logo' in body ? mediaName(body.logo) : b.logo, Number(body.sort ?? b.sort) || 0, b.id);
+  pushSoon(); return get('SELECT * FROM web_brands WHERE id=?', b.id);
+});
+route('DELETE', '/api/web/brands/:id', ADMIN, ({ params }) => {
+  tx(() => { run('UPDATE products SET web_brand_id=NULL WHERE web_brand_id=?', params.id); run('DELETE FROM web_brands WHERE id=?', params.id); });
+  pushSoon(); return { ok: true };
+});
+// ===== بنرات الموقع =====
+const BANNER_PLACES = ['hero', 'mid', 'tiles'];
+const BANNER_LINKS = ['none', 'category', 'brand', 'product', 'offers', 'new', 'shop', 'url'];
+function bannerData(b, old = {}) {
+  const x = { ...old, ...b };
+  const image = mediaName(x.image); if (!image) throw bad('اختر صورة البنر');
+  const place = BANNER_PLACES.includes(x.place) ? x.place : 'hero';
+  const link_type = BANNER_LINKS.includes(x.link_type) ? x.link_type : 'none';
+  let link_value = x.link_value == null ? null : String(x.link_value).trim().slice(0, 500) || null;
+  if (['category', 'brand', 'product'].includes(link_type) && !link_value) throw bad('اختر وجهة الرابط');
+  if (link_type === 'url' && !/^(https?:\/\/|\/)/.test(link_value || '')) throw bad('الرابط يجب أن يبدأ بـ https:// أو /');
+  const d = (v) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  return [place, image, mediaName(x.image_m), String(x.title || '').slice(0, 120) || null, String(x.subtitle || '').slice(0, 240) || null, String(x.cta || '').slice(0, 40) || null,
+    link_type, link_value, Number(x.sort) || 0, x.active === false || x.active === 0 ? 0 : 1, d(x.starts), d(x.ends), x.theme === 'light' ? 'light' : 'dark'];
+}
+route('GET', '/api/web/banners', ADMIN, () => all('SELECT * FROM web_banners ORDER BY place, sort, id'));
+route('POST', '/api/web/banners', ADMIN, ({ body }) => {
+  const id = run('INSERT INTO web_banners(place,image,image_m,title,subtitle,cta,link_type,link_value,sort,active,starts,ends,theme) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', ...bannerData(body)).lastInsertRowid;
+  pushSoon(); return get('SELECT * FROM web_banners WHERE id=?', id);
+});
+route('PUT', '/api/web/banners/:id', ADMIN, ({ body, params }) => {
+  const b = get('SELECT * FROM web_banners WHERE id=?', params.id); if (!b) throw new HttpError(404, 'البنر غير موجود');
+  run('UPDATE web_banners SET place=?,image=?,image_m=?,title=?,subtitle=?,cta=?,link_type=?,link_value=?,sort=?,active=?,starts=?,ends=?,theme=? WHERE id=?', ...bannerData(body, b), b.id);
+  pushSoon(); return get('SELECT * FROM web_banners WHERE id=?', b.id);
+});
+route('POST', '/api/web/banners/order', ADMIN, ({ body }) => {
+  tx(() => (body.ids || []).forEach((id, i) => run('UPDATE web_banners SET sort=? WHERE id=?', i + 1, Number(id))));
+  pushSoon(); return { ok: true };
+});
+route('DELETE', '/api/web/banners/:id', ADMIN, ({ params }) => { run('DELETE FROM web_banners WHERE id=?', params.id); pushSoon(); return { ok: true }; });
 route('GET', '/api/web/orders', ADMIN, ({ query }) => {
   const w = []; const p = [];
   if (query.status) { w.push('o.status=?'); p.push(query.status); }

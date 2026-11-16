@@ -43,20 +43,41 @@ async function main() {
   const img = (await A('POST', '/web/media', { data: png })).d.name;
   ok(/^[a-f0-9]{40}\.png$/.test(img), 'رفع صورة منتج');
   ok((await fetch(`http://127.0.0.1:${EP}/media/${img}`)).status === 200, 'عرض الصورة من النظام الإداري');
-  await A('PUT', '/web/products/' + p1.id, { web_published: true, web_images: [img], web_description: 'عطر فاخر', web_compare_price: 40000, web_featured: true });
+  // أقسام الموقع (رئيسي/فرعي) والبراند
+  const wc = (await A('POST', '/web/categories', { name: 'عطور' })).d;
+  const ws = (await A('POST', '/web/categories', { name: 'عطور نسائية', parent_id: wc.id })).d;
+  const wc2 = (await A('POST', '/web/categories', { name: 'مكياج' })).d;
+  ok((await A('POST', '/web/categories', { name: 'x', parent_id: ws.id })).status === 400, 'لا قسم فرعي داخل قسم فرعي');
+  const br = (await A('POST', '/web/brands', { name: 'Dior' })).d;
+  ok((await A('POST', '/web/brands', { name: 'Dior' })).status === 400, 'لا يتكرر البراند');
+  ok((await A('PUT', '/web/products/' + p1.id, { web_cat_id: wc2.id, web_sub_id: ws.id })).status === 400, 'القسم الفرعي يجب أن يتبع الرئيسي');
+  await A('PUT', '/web/products/' + p1.id, { web_published: true, web_images: [img], web_description: 'عطر فاخر', web_compare_price: 40000, web_featured: true, web_sub_id: ws.id, web_brand_id: br.id });
+  const wpp = (await A('GET', '/web/products')).d.find((x) => x.id === p1.id);
+  ok(wpp.web_cat_id === wc.id && wpp.web_sub_id === ws.id && wpp.web_brand_id === br.id, 'اختيار الفرعي يحدد الرئيسي تلقائياً');
+  // بنرات
+  ok((await A('POST', '/web/banners', { place: 'hero' })).status === 400, 'البنر يتطلب صورة');
+  const bn = (await A('POST', '/web/banners', { place: 'hero', image: img, title: 'عرض', link_type: 'category', link_value: ws.id })).d;
+  await A('POST', '/web/banners', { place: 'mid', image: img, link_type: 'brand', link_value: br.id });
+  await A('POST', '/web/banners', { place: 'tiles', image: img, link_type: 'offers', ends: '2000-01-01' });
+  ok(bn.id && (await A('GET', '/web/banners')).d.length === 3, 'إضافة البنرات');
   await A('PUT', '/web/products/' + p2.id, { web_published: true, web_new: true });
   // مزامنة
   const r1 = await A('POST', '/web/sync');
   ok(r1.status === 200 && r1.d.products === 2 && r1.d.images === 1, 'المزامنة الأولى', JSON.stringify(r1.d));
   const store = (await req(W, null, 'GET', '/store')).d;
-  ok(store.store.whatsapp === '07701234567' && store.hero.title === 'عنوان تجريبي' && store.categories.length === 1, 'المحتوى والتصنيفات في الموقع');
+  ok(store.store.whatsapp === '07701234567' && store.hero.title === 'عنوان تجريبي' && store.categories.length === 2, 'المحتوى والتصنيفات في الموقع', JSON.stringify(store.categories));
+  ok(store.categories.find((c) => c.id === ws.id).parent_id === wc.id && !store.categories.find((c) => c.id === wc2.id), 'شجرة الأقسام (المستخدمة فقط)');
+  ok(store.brands.length === 1 && store.brands[0].name === 'Dior', 'البراندات في الموقع');
+  ok(store.banners.length === 2 && store.banners.find((b) => b.place === 'hero').link.startsWith('/c/') && store.banners.find((b) => b.place === 'mid').link.startsWith('/brand/'), 'البنرات وروابطها (المنتهي لا يظهر)', JSON.stringify(store.banners));
+  ok((await req(W, null, 'GET', '/products?category=' + wc.id)).d.total === 1 && (await req(W, null, 'GET', '/products?category=' + ws.id)).d.total === 1 && (await req(W, null, 'GET', '/products?brand=' + br.id)).d.total === 1, 'التصفية بالقسم الرئيسي والفرعي والبراند');
+  ok((await req(W, null, 'GET', '/products?q=Dior')).d.total === 1, 'البحث باسم البراند');
   const list = (await req(W, null, 'GET', '/products')).d;
   ok(list.total === 2, 'فقط المنتجات المنشورة تظهر في الموقع');
   const wp1 = list.items.find((x) => x.id === p1.id);
   ok(wp1 && wp1.compare_price === 40000 && wp1.images[0] === img && wp1.featured, 'بيانات المنتج في الموقع');
   ok((await fetch(`http://127.0.0.1:${WP}/media/${img}`)).status === 200, 'الصورة مرفوعة للموقع');
   const det = (await req(W, null, 'GET', '/products/' + wp1.slug)).d;
-  ok(det.description === 'عطر فاخر' && det.category.name === 'عطور', 'صفحة المنتج');
+  ok(det.description === 'عطر فاخر' && det.category.name === 'عطور' && det.sub.name === 'عطور نسائية' && det.brand.name === 'Dior', 'صفحة المنتج');
   const html = await (await fetch(`http://127.0.0.1:${WP}/p/${encodeURIComponent(wp1.slug)}`)).text();
   ok(html.includes('<title>عطر الملكة'), 'عنوان صفحة المنتج للمشاركة ومحركات البحث');
   // طلب من الموقع
@@ -83,6 +104,9 @@ async function main() {
   const tr = (await req(W, null, 'GET', `/orders/track?no=${o.d.no}&phone=07701234567`)).d;
   ok(tr.status === 'shipping' && tr.history.length === 3, 'الزبون يرى حالة الطلب', JSON.stringify(tr.status));
   ok((await req(W, null, 'GET', `/orders/track?no=${o.d.no}&phone=07709999999`)).status === 404, 'التتبع يتطلب رقم الهاتف الصحيح');
+  const bp = (await req(W, null, 'GET', '/orders/by-phone?phone=' + encodeURIComponent('+964 770 123 4567'))).d;
+  ok(bp.orders.length === 1 && bp.orders[0].status === 'shipping' && bp.orders[0].items.length === 2 && !('address' in bp.orders[0]) && !('name' in bp.orders[0]), 'تتبع كل الطلبات برقم الهاتف فقط (بدون العنوان)');
+  ok((await req(W, null, 'GET', '/orders/by-phone?phone=123')).status === 400, 'رقم هاتف غير صحيح للتتبع');
   const d = await A('PUT', '/web/orders/' + eo.id, { status: 'delivered', payment: 'cash' });
   ok(d.status === 200 && d.d.invoice_id, 'التسليم يصدر فاتورة');
   const inv = (await A('GET', '/invoices/' + d.d.invoice_id)).d;
@@ -105,10 +129,36 @@ async function main() {
   const invr = (await A('GET', '/reports/inventory')).d;
   ok(near(tb.find((r) => r.code === '1301').closing, invr.rows.reduce((s, r) => s + r.stock * r.cost, 0), 1), 'المخزون = حساب المخزون');
   // صفحات الموقع
-  for (const p of ['/', '/shop', '/cart', '/checkout', '/track', '/about', '/fonts/fonts.css', '/icon.png', '/robots.txt', '/healthz'])
+  for (const p of ['/', '/shop', '/cart', '/checkout', '/track', '/orders', '/wishlist', '/categories', '/brand/x', '/about', '/sw.js', '/fonts/fonts.css', '/icon.png', '/robots.txt', '/healthz'])
     ok((await fetch(`http://127.0.0.1:${WP}${p}`)).status === 200, 'صفحة الموقع ' + p);
   ok((await fetch(`http://127.0.0.1:${WP}/p/not-found-1`)).status === 404, 'منتج غير موجود 404');
   ok((await fetch(`http://127.0.0.1:${WP}/%E0%A4%A`)).status === 400 && (await fetch(`http://127.0.0.1:${WP}/healthz`)).status === 200, 'رابط تالف لا يوقف الموقع');
+  // ===== التحديث المباشر =====
+  const sse = async (url, headers = {}) => {
+    const ctl = new AbortController(); const r = await fetch(url, { headers, signal: ctl.signal });
+    const events = []; let buf = '';
+    (async () => { try { for await (const c of r.body) { buf += new TextDecoder().decode(c); let i; while ((i = buf.indexOf('\n\n')) >= 0) { const b = buf.slice(0, i); buf = buf.slice(i + 2); const ev = (b.match(/^event: (.+)$/m) || [])[1]; if (ev) events.push({ ev, data: JSON.parse((b.match(/^data: (.+)$/m) || [])[1] || '{}') }); } } } catch { /* */ } })();
+    return { events, close: () => ctl.abort(), status: r.status };
+  };
+  const wait = async (fn, ms = 6000) => { for (let t = 0; t < ms; t += 100) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 100)); } return false; };
+  ok((await fetch(`http://127.0.0.1:${WP}/api/sync/events`)).status === 401, 'قناة النظام الإداري المباشرة تتطلب المفتاح');
+  const pub = await sse(`http://127.0.0.1:${WP}/api/live`);
+  ok(pub.status === 200, 'قناة الزوار المباشرة');
+  // تفعيل الربط التلقائي: تغيير السعر في النظام يصل للموقع بدون مزامنة يدوية، والطلب يصل للنظام فوراً
+  await A('PUT', '/settings', { web: { url: `http://127.0.0.1:${WP}`, key: KEY, enabled: true, interval: 3600 } });
+  await new Promise((r) => setTimeout(r, 1500));
+  ok(await wait(async () => (await A('GET', '/web/status')).d.live === true), 'اتصال مباشر دائم بين النظام والموقع');
+  await A('PUT', '/products/' + p1.id, { ...(await A('GET', '/products/' + p1.id)).d, price: 33000 });
+  ok(await wait(async () => (await req(W, null, 'GET', '/products/' + wp1.slug)).d.price === 33000), 'تعديل السعر يصل للموقع تلقائياً خلال ثوانٍ');
+  ok(pub.events.some((e) => e.ev === 'catalog'), 'الزوار يُبلَّغون بتحديث الكتالوج مباشرة');
+  const o3 = await req(W, null, 'POST', '/orders', { name: 'مريم', phone: '07901234567', governorate: 'بغداد', address: 'المنصور قرب المول', items: [{ id: p1.id, qty: 1 }] });
+  ok(o3.status === 200 && o3.d.token, 'رمز تتبع مباشر للطلب');
+  ok(await wait(async () => (await A('GET', '/web/orders')).d.some((x) => x.no === o3.d.no)), 'الطلب الجديد يصل للنظام الإداري فوراً');
+  const eo3 = (await A('GET', '/web/orders')).d.find((x) => x.no === o3.d.no);
+  await A('PUT', '/web/orders/' + eo3.id, { status: 'confirmed' });
+  ok(await wait(() => pub.events.some((e) => e.ev === 'order' && e.data.t === o3.d.token && e.data.status === 'confirmed')), 'الزبون يرى تغيير حالة طلبه مباشرة');
+  pub.close();
+  await A('PUT', '/settings', { web: { url: `http://127.0.0.1:${WP}`, key: KEY, enabled: false } });
   // الحد من الإغراق بالطلبات
   let limited = false;
   for (let i = 0; i < 8; i++) { const r = await req(W, null, 'POST', '/orders', { name: 'x y', phone: '07700000000', governorate: 'بغداد', address: 'عنوان طويل', items: [{ id: p1.id, qty: 1 }] }); if (r.status === 429) limited = true; }
