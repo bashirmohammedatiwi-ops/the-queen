@@ -3,7 +3,7 @@
   const { esc, fmt, icon, n } = Q;
   Q.tokenKey = 'queen_pos_token';
   const HOLD_KEY = 'queen_pos_held';
-  const S = { user: null, shift: null, products: [], cats: [], cat: '', q: '', cart: [], customer: null, discount: 0, es: null };
+  const S = { user: null, shift: null, products: [], cats: [], cart: [], customer: null, discount: 0, es: null, sel: -1, mult: 1 };
   const app = document.getElementById('app');
 
   // ===== الدخول بالرمز السري =====
@@ -45,7 +45,7 @@
     render();
     S.es?.close();
     S.es = Q.listen({
-      products: Q.debounce(async () => { await loadProducts(); drawGrid(); syncCart(); }, 300),
+      products: Q.debounce(async () => { await loadProducts(); syncCart(); }, 300),
       settings: async () => { await Q.loadSettings(); drawCart(); },
     });
     if (S.es) { S.es.onopen = () => live(true); S.es.onerror = () => live(false); }
@@ -64,14 +64,15 @@
   const can = (k) => S.user.role !== 'cashier' || !!Q.settings.pos[k];
   const maxDisc = () => (S.user.role === 'cashier' ? Number(Q.settings.pos.cashier_max_discount) || 0 : 0);
 
-  // ===== الواجهة =====
+  // ===== الواجهة: البيع بمسح الباركود =====
+  // حقل الباركود يحتفظ بالمؤشر دائماً؛ أي ضغطة مفتاح تذهب إليه، ويعود إليه المؤشر بعد كل عملية
   function render() {
     const st = Q.settings.store;
     app.innerHTML = `<div class="pos">
       <header class="ptop">
         <div class="brand"><div class="brand-mark">${st.logo ? `<img src="${st.logo}">` : 'Q'}</div><div><div class="brand-t">${esc(st.name)}</div><div class="brand-s"><span class="live" id="live"></span>نقطة البيع</div></div></div>
-        <div class="search" style="margin-right:14px">${icon('search')}<input class="input" id="q" placeholder="ابحث بالاسم أو امسح الباركود…  (F2)" autocomplete="off"></div>
         <span class="sp"></span>
+        <button class="btn" id="b-find">${icon('search')} بحث بالاسم <span class="kbd">F3</span></button>
         <button class="btn" id="b-inv">${icon('file')} الفواتير</button>
         <button class="btn" id="b-held">${icon('pause')} المعلقة <span class="tag" id="heldn">0</span></button>
         <button class="btn" id="b-shift">${icon('clock')} الوردية</button>
@@ -79,68 +80,106 @@
         <div class="info"><b>${esc(S.user.name)}</b><span id="shinfo"></span></div>
         <button class="btn ghost icon" id="b-out" title="خروج">${icon('out')}</button>
       </header>
-      <section class="prods"><div class="cats" id="cats"></div><div class="grid" id="grid"></div></section>
-      <aside class="cart">
-        <div class="cart-h"><div class="cust" id="cust">${icon('user')}<span>عميل نقدي</span></div><button class="btn icon danger" id="b-clear" title="إفراغ السلة">${icon('trash')}</button></div>
+      <section class="main">
+        <div class="scan" id="scanbox">
+          <div class="scan-ic">${icon('barcode', 26)}</div>
+          <input id="scan" class="scan-in" autocomplete="off" autocorrect="off" spellcheck="false" inputmode="none" dir="ltr" placeholder="امسح الباركود…">
+          <div class="scan-qty" id="sqty" hidden></div>
+          <div class="scan-msg" id="smsg"><span class="muted">جاهز للمسح — اكتب <b class="mono">3*</b> قبل المسح لإضافة 3 قطع</span></div>
+        </div>
+        <div class="tbl-h"><span>#</span><span>الصنف</span><span class="n">السعر</span><span class="c">الكمية</span><span class="n">الخصم</span><span class="n">المجموع</span><span></span></div>
         <div class="lines" id="lines"></div>
+        <div class="keys"><span><span class="kbd">↑↓</span> تحديد سطر</span><span><span class="kbd">+</span><span class="kbd">−</span> الكمية</span><span><span class="kbd">*</span> كمية</span><span><span class="kbd">Del</span> حذف</span><span><span class="kbd">F6</span> خصم</span><span><span class="kbd">F4</span> تعليق</span><span><span class="kbd">F7</span> مرتجع</span><span><span class="kbd">F8</span> عميل</span></div>
+      </section>
+      <aside class="side">
+        <div class="cust" id="cust">${icon('user')}<span>عميل نقدي</span></div>
+        <div class="big-total"><div class="k">الإجمالي</div><div class="v" id="gt">0</div><div class="cur">${esc(Q.settings.currency)}</div></div>
         <div class="sum" id="sum"></div>
-        <div class="acts"><button class="btn" id="b-disc">خصم</button><button class="btn" id="b-hold">${icon('pause')} تعليق <span class="kbd">F4</span></button><button class="btn" id="b-ret">${icon('ret')} مرتجع</button></div>
-        <button class="btn primary paybtn" id="b-pay">الدفع <span class="kbd" style="background:transparent;color:#fff;border-color:rgba(255,255,255,.4)">F9</span></button>
+        <div class="acts">
+          <button class="btn" id="b-disc">خصم <span class="kbd">F6</span></button>
+          <button class="btn" id="b-hold">${icon('pause')} تعليق <span class="kbd">F4</span></button>
+          <button class="btn" id="b-ret">${icon('ret')} مرتجع <span class="kbd">F7</span></button>
+          <button class="btn danger" id="b-clear">${icon('trash')} إلغاء</button>
+        </div>
+        <button class="btn primary paybtn" id="b-pay">${icon('cash', 20)} الدفع <span class="kbd inv">F9</span></button>
+        <button class="btn paybtn2" id="b-quick">نقدي بالمبلغ الكامل <span class="kbd">F10</span></button>
       </aside></div>`;
-    const q = Q.$('#q');
-    q.oninput = () => { S.q = q.value.trim(); drawGrid(); };
-    q.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const v = q.value.trim(); if (!v) return;
-        const p = S.products.find((x) => x.barcode === v || x.sku === v);
-        if (p) { add(p); q.value = ''; S.q = ''; drawGrid(); return; }
-        const list = filtered();
-        if (list.length === 1) { add(list[0]); q.value = ''; S.q = ''; drawGrid(); } else if (!list.length) Q.toast('الصنف غير موجود: ' + v, 'err');
-      } else if (e.key === 'Escape') { q.value = ''; S.q = ''; drawGrid(); }
-    };
+    const sc = Q.$('#scan');
+    sc.onkeydown = onScanKey;
+    sc.oninput = () => { const m = sc.value.match(/^(\d+(?:\.\d+)?)\*$/); if (m) { S.mult = Number(m[1]); sc.value = ''; showMult(); } };
     Q.$('#cust').onclick = pickCustomer;
-    Q.$('#b-clear').onclick = async () => { if (S.cart.length && (await Q.confirm('إفراغ السلة؟', { danger: true, ok: 'إفراغ' }))) reset(); };
+    Q.$('#b-clear').onclick = async () => { if (S.cart.length && (await Q.confirm('إلغاء الفاتورة الحالية وإفراغ السلة؟', { danger: true, ok: 'إلغاء الفاتورة' }))) reset(); else focusSearch(); };
     Q.$('#b-disc').onclick = discountDlg;
     Q.$('#b-hold').onclick = hold;
     Q.$('#b-held').onclick = heldDlg;
-    Q.$('#b-pay').onclick = pay;
+    Q.$('#b-pay').onclick = () => pay();
+    Q.$('#b-quick').onclick = quickCash;
     Q.$('#b-inv').onclick = invoicesDlg;
     Q.$('#b-ret').onclick = returnLookup;
     Q.$('#b-shift').onclick = shiftDlg;
+    Q.$('#b-find').onclick = findDlg;
     Q.$('#b-dev') && (Q.$('#b-dev').onclick = () => Q.print.deviceDialog());
-    Q.$('#b-out').onclick = async () => { if (S.cart.length && !(await Q.confirm('السلة غير فارغة، الخروج على أي حال؟'))) return; try { await Q.post('/logout'); } catch { /* */ } localStorage.removeItem(Q.tokenKey); login(); };
-    drawCats(); drawGrid(); drawCart(); shiftInfo(); heldCount();
-    q.focus();
+    Q.$('#b-out').onclick = async () => { if (S.cart.length && !(await Q.confirm('السلة غير فارغة، الخروج على أي حال؟'))) return focusSearch(); try { await Q.post('/logout'); } catch { /* */ } localStorage.removeItem(Q.tokenKey); login(); };
+    drawCart(); shiftInfo(); heldCount();
+    sc.focus();
   }
   const shiftInfo = () => { const el = Q.$('#shinfo'); if (el) el.textContent = S.shift ? `وردية #${S.shift.shift.id}` : 'لا توجد وردية'; };
-  const focusSearch = () => setTimeout(() => { if (!document.querySelector('.modal-bg')) Q.$('#q')?.focus(); }, 30);
+  const modalOpen = () => !!document.querySelector('.modal-bg');
+  const focusSearch = () => setTimeout(() => { if (!modalOpen()) { const s = Q.$('#scan'); if (s && document.activeElement !== s) s.focus(); } }, 30);
+  // إعادة المؤشر لحقل الباركود دائماً
+  document.addEventListener('mouseup', () => { if (!modalOpen() && Q.$('#scan') && !window.getSelection().toString()) focusSearch(); });
+  window.addEventListener('focus', focusSearch);
+  setInterval(() => { if (Q.$('#scan') && !modalOpen() && document.activeElement !== Q.$('#scan') && document.hasFocus()) Q.$('#scan').focus(); }, 800);
 
-  function drawCats() {
-    const el = Q.$('#cats');
-    // شجرة المواد: الفروع الرئيسية، وعند اختيار فرع يظهر مساره وفروعه التابعة
-    const has = (c) => (c.total ?? c.products) > 0;
-    const byId = (id) => S.cats.find((c) => c.id == id);
-    const kids = (id) => S.cats.filter((c) => (c.parent_id || null) == (id || null) && has(c));
-    const path = []; for (let x = byId(S.cat); x; x = byId(x.parent_id)) path.unshift(x);
-    const btn = (c, on, cls = '') => `<button data-c="${c.id}" class="${on ? 'on' : ''} ${cls}">${esc(c.name)}</button>`;
-    el.innerHTML = `<button data-c="" class="${S.cat === '' ? 'on' : ''}">الكل</button>`
-      + (path.length ? path.map((c, i) => btn(c, i === path.length - 1, 'crumb')).join('<span class="sepc">›</span>') + (kids(S.cat).length ? '<span class="sepc">|</span>' + kids(S.cat).map((c) => btn(c, false)).join('') : '')
-        : kids(null).map((c) => btn(c, false)).join(''));
-    el.querySelectorAll('button').forEach((b) => (b.onclick = () => { S.cat = b.dataset.c; drawCats(); drawGrid(); focusSearch(); }));
+  // صوت تأكيد المسح وصوت الخطأ
+  let ac = null;
+  function beep(ok = true) {
+    try {
+      ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = ok ? 'sine' : 'square'; o.frequency.value = ok ? 1250 : 220;
+      g.gain.setValueAtTime(ok ? 0.08 : 0.06, ac.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + (ok ? 0.09 : 0.35));
+      o.connect(g); g.connect(ac.destination); o.start(); o.stop(ac.currentTime + (ok ? 0.1 : 0.36));
+    } catch { /* */ }
   }
-  const filtered = () => {
-    const q = S.q.toLowerCase();
-    const sub = new Set(); if (S.cat) { sub.add(Number(S.cat)); for (let grew = true; grew;) { grew = false; for (const c of S.cats) if (c.parent_id && sub.has(c.parent_id) && !sub.has(c.id)) { sub.add(c.id); grew = true; } } }
-    return S.products.filter((p) => (!S.cat || sub.has(p.category_id)) && (!q || p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q) || (p.sku || '').toLowerCase().includes(q)));
-  };
-  function drawGrid() {
-    const el = Q.$('#grid'); if (!el) return;
-    const list = filtered();
-    el.innerHTML = list.length ? list.slice(0, 300).map((p) => `<button class="tile" data-id="${p.id}"><div class="nm">${esc(p.name)}</div>
-      <div class="ft"><span class="pr">${fmt(p.price)}</span><span class="sk ${p.stock <= 0 ? 'out' : p.stock <= p.min_stock ? 'low' : ''}">${Q.qty(p.stock)} ${esc(p.unit || '')}</span></div></button>`).join('')
-      : `<div class="empty" style="grid-column:1/-1">${S.products.length ? 'لا توجد نتائج' : 'لا توجد أصناف — أضف الأصناف من النظام الإداري'}</div>`;
-    el.querySelectorAll('.tile').forEach((b) => (b.onclick = () => { add(S.products.find((p) => p.id == b.dataset.id)); focusSearch(); }));
+  function msg(html, type = '') {
+    const el = Q.$('#smsg'), box = Q.$('#scanbox'); if (!el) return;
+    el.innerHTML = html; box.classList.remove('ok', 'bad'); void box.offsetWidth; if (type) box.classList.add(type);
+  }
+  const showMult = () => { const q = Q.$('#sqty'); q.hidden = S.mult === 1; q.textContent = '× ' + Q.qty(S.mult); };
+
+  // البحث عن الصنف بالباركود أو الرمز (مع دعم الأرقام العربية)
+  const norm = (v) => String(v || '').trim().replace(/[٠-٩]/g, (c) => '٠١٢٣٤٥٦٧٨٩'.indexOf(c));
+  const byCode = (v) => { v = norm(v); return S.products.find((x) => x.barcode === v) || S.products.find((x) => (x.sku || '').toLowerCase() === v.toLowerCase()); };
+  function onScanKey(e) {
+    const sc = e.target;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      let v = norm(sc.value); sc.value = '';
+      if (!v) return;
+      let qty = S.mult;
+      const m = v.match(/^(\d+(?:\.\d+)?)\*(.+)$/); if (m) { qty = Number(m[1]); v = m[2].trim(); }
+      S.mult = 1; showMult();
+      const p = byCode(v);
+      if (p) { add(p, qty); return; }
+      beep(false);
+      msg(`<b class="err">الصنف غير موجود:</b> <span class="mono">${esc(v)}</span> <span class="muted">— تأكد من الباركود أو ابحث بالاسم (F3)</span>`, 'bad');
+      return;
+    }
+    if (sc.value) { if (e.key === 'Escape') { sc.value = ''; S.mult = 1; showMult(); } return; }
+    // اختصارات السطر المحدد عندما يكون الحقل فارغاً
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (S.cart.length) { S.sel = Math.max(0, Math.min(S.cart.length - 1, S.sel + (e.key === 'ArrowDown' ? 1 : -1))); drawCart(); } }
+    else if (e.key === '+' ) { e.preventDefault(); bump(1); }
+    else if (e.key === '-') { e.preventDefault(); bump(-1); }
+    else if (e.key === 'Delete') { e.preventDefault(); if (S.cart[S.sel]) { S.cart.splice(S.sel, 1); S.sel = Math.min(S.sel, S.cart.length - 1); drawCart(); } }
+    else if (e.key === '*') { e.preventDefault(); if (S.cart[S.sel]) editLine(S.sel); }
+    else if (e.key === 'Escape') { S.mult = 1; showMult(); }
+  }
+  function bump(d) {
+    const l = S.cart[S.sel]; if (!l) return;
+    if (d > 0) { const p = S.products.find((x) => x.id === l.id) || { ...l, stock: Infinity }; return add(p, 1); }
+    l.qty -= 1; if (l.qty <= 0) { S.cart.splice(S.sel, 1); S.sel = Math.min(S.sel, S.cart.length - 1); }
+    drawCart();
   }
 
   // ===== السلة =====
@@ -148,9 +187,14 @@
     if (!p) return;
     const ex = S.cart.find((l) => l.id === p.id);
     const inCart = ex ? ex.qty : 0;
-    if (!Q.settings.pos.allow_negative_stock && inCart + qty > p.stock) return Q.toast(`الكمية المتوفرة من "${p.name}" هي ${Q.qty(p.stock)} فقط`, 'err');
-    if (ex) ex.qty += qty; else S.cart.push({ id: p.id, name: p.name, price: p.price, qty, discount: 0, stock: p.stock, min: p.min_stock });
-    if (Q.settings.pos.low_stock_warning && p.stock - (inCart + qty) < 0 && Q.settings.pos.allow_negative_stock) Q.toast(`تنبيه: الكمية في النظام غير كافية (${Q.qty(p.stock)})`);
+    if (!Q.settings.pos.allow_negative_stock && inCart + qty > p.stock) { beep(false); msg(`<b class="err">الكمية غير كافية:</b> ${esc(p.name)} — المتوفر ${Q.qty(p.stock)}`, 'bad'); return; }
+    if (ex) ex.qty += qty;
+    else S.cart.push({ id: p.id, name: p.name, code: p.barcode || p.sku || '', unit: p.unit || '', price: p.price, qty, discount: 0, stock: p.stock, min: p.min_stock });
+    S.sel = S.cart.indexOf(ex || S.cart[S.cart.length - 1]);
+    beep(true);
+    const l = S.cart[S.sel];
+    const warn = Q.settings.pos.low_stock_warning && p.stock - (inCart + qty) < 0 ? ` <span class="tag warn">المخزون في النظام ${Q.qty(p.stock)}</span>` : '';
+    msg(`<b>${esc(p.name)}</b> <span class="muted">×</span> <b class="num">${Q.qty(l.qty)}</b> <span class="sp"></span><b class="num pr">${fmt(p.price)}</b>${warn}`, 'ok');
     drawCart(p.id);
   }
   const totals = () => {
@@ -162,32 +206,81 @@
     const rate = t.enabled ? Number(t.rate) : 0;
     let tax, total;
     if (t.inclusive) { total = net; tax = m(net - net / (1 + rate / 100)); } else { tax = m(net * rate / 100); total = m(net + tax); }
-    return { subtotal, discount, tax, total, rate, count: S.cart.reduce((s, l) => s + l.qty, 0) };
+    return { subtotal, discount, tax, total, rate, count: S.cart.reduce((s, l) => s + l.qty, 0), lines: S.cart.length };
   };
   function drawCart(flashId) {
     const el = Q.$('#lines'); if (!el) return;
-    if (!S.cart.length) el.innerHTML = `<div class="cart-empty"><div>${icon('cart', 34)}<div style="margin-top:8px">السلة فارغة</div><div style="font-size:12px">امسح الباركود أو اختر صنفاً</div></div></div>`;
+    if (S.sel >= S.cart.length) S.sel = S.cart.length - 1;
+    if (!S.cart.length) el.innerHTML = `<div class="cart-empty"><div>${icon('barcode', 54)}<div class="t">امسح باركود الصنف لبدء الفاتورة</div><div class="s">أو اضغط F3 للبحث بالاسم</div></div></div>`;
     else {
-      el.innerHTML = S.cart.map((l, i) => `<div class="ln ${l.id === flashId ? 'flash' : ''}" data-i="${i}"><div><div class="nm">${esc(l.name)}</div>
-        <div class="sub">${fmt(l.price)}${l.discount ? ` · خصم ${fmt(l.discount)}` : ''}</div></div>
-        <div class="qt"><button data-m="${i}">${icon('minus', 13)}</button><span>${Q.qty(l.qty)}</span><button data-p="${i}">${icon('plus', 13)}</button></div>
-        <div class="tt">${fmt(l.qty * l.price - (l.discount || 0))}</div></div>`).join('');
-      el.querySelectorAll('[data-m]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const l = S.cart[b.dataset.m]; l.qty -= 1; if (l.qty <= 0) S.cart.splice(b.dataset.m, 1); drawCart(); focusSearch(); }));
-      el.querySelectorAll('[data-p]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); const l = S.cart[b.dataset.p]; add(S.products.find((p) => p.id === l.id) || { ...l, stock: Infinity }); focusSearch(); }));
-      el.querySelectorAll('.ln').forEach((r) => (r.onclick = () => editLine(Number(r.dataset.i))));
-      if (flashId) el.querySelector('.flash')?.scrollIntoView({ block: 'nearest' });
+      el.innerHTML = S.cart.map((l, i) => `<div class="ln ${i === S.sel ? 'sel' : ''} ${l.id === flashId ? 'flash' : ''}" data-i="${i}">
+        <span class="no num">${i + 1}</span>
+        <div class="nmw"><div class="nm">${esc(l.name)}</div><div class="sub mono">${esc(l.code || '')}${l.edited ? ' <span class="tag">سعر معدّل</span>' : ''}</div></div>
+        <span class="n num">${fmt(l.price)}</span>
+        <div class="qt"><button data-m="${i}" tabindex="-1">${icon('minus', 14)}</button><span class="num">${Q.qty(l.qty)}</span><button data-p="${i}" tabindex="-1">${icon('plus', 14)}</button></div>
+        <span class="n num ${l.discount ? 'err' : 'faint'}">${l.discount ? fmt(l.discount) : '—'}</span>
+        <span class="n num tt">${fmt(l.qty * l.price - (l.discount || 0))}</span>
+        <button class="rm" data-rm="${i}" tabindex="-1" title="حذف">${icon('x', 15)}</button></div>`).join('');
+      el.querySelectorAll('[data-m]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); S.sel = Number(b.dataset.m); bump(-1); focusSearch(); }));
+      el.querySelectorAll('[data-p]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); S.sel = Number(b.dataset.p); bump(1); focusSearch(); }));
+      el.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); S.cart.splice(Number(b.dataset.rm), 1); drawCart(); focusSearch(); }));
+      el.querySelectorAll('.ln').forEach((r) => (r.onclick = () => { S.sel = Number(r.dataset.i); drawCart(); focusSearch(); }));
+      el.querySelectorAll('.ln').forEach((r) => (r.ondblclick = () => editLine(Number(r.dataset.i))));
+      el.querySelector('.ln.sel')?.scrollIntoView({ block: 'nearest' });
     }
     const t = totals();
-    Q.$('#sum').innerHTML = `<div class="kv"><span>عدد القطع</span><b>${Q.qty(t.count)}</b></div><div class="kv"><span>المجموع</span><b>${fmt(t.subtotal)}</b></div>
-      ${t.discount ? `<div class="kv"><span>الخصم</span><b class="err">-${fmt(t.discount)}</b></div>` : ''}
-      ${t.tax ? `<div class="kv"><span>الضريبة ${t.rate}%${Q.settings.tax.inclusive ? ' (شاملة)' : ''}</span><b>${fmt(t.tax)}</b></div>` : ''}
-      <div class="grand"><span>الإجمالي</span><span class="v">${fmt(t.total)} <small style="font-size:13px">${esc(Q.settings.currency)}</small></span></div>`;
+    Q.$('#gt').textContent = fmt(t.total);
+    Q.$('#sum').innerHTML = `<div class="kv"><span>عدد الأصناف / القطع</span><b class="num">${t.lines} / ${Q.qty(t.count)}</b></div><div class="kv"><span>المجموع</span><b class="num">${fmt(t.subtotal)}</b></div>
+      ${t.discount ? `<div class="kv"><span>خصم الفاتورة</span><b class="err num">-${fmt(t.discount)}</b></div>` : ''}
+      ${t.tax ? `<div class="kv"><span>الضريبة ${t.rate}%${Q.settings.tax.inclusive ? ' (شاملة)' : ''}</span><b class="num">${fmt(t.tax)}</b></div>` : ''}`;
     const c = Q.$('#cust');
     c.classList.toggle('set', !!S.customer);
-    c.innerHTML = `${icon('user')}<span>${esc(S.customer ? S.customer.name + (S.customer.phone ? ' — ' + S.customer.phone : '') : 'عميل نقدي')}</span>`;
-    Q.$('#b-pay').disabled = !S.cart.length;
+    c.innerHTML = `${icon('user')}<span>${esc(S.customer ? S.customer.name + (S.customer.phone ? ' — ' + S.customer.phone : '') : 'عميل نقدي')}</span><span class="kbd">F8</span>`;
+    Q.$('#b-pay').disabled = !S.cart.length; Q.$('#b-quick').disabled = !S.cart.length;
   }
-  function reset() { S.cart = []; S.customer = null; S.discount = 0; drawCart(); focusSearch(); }
+  function reset() { S.cart = []; S.customer = null; S.discount = 0; S.sel = -1; S.mult = 1; showMult(); drawCart(); msg('<span class="muted">جاهز للمسح</span>'); focusSearch(); }
+
+  // البحث بالاسم (للأصناف بدون باركود) — يعمل بالكامل من لوحة المفاتيح
+  function findDlg() {
+    let list = [], cur = 0;
+    const m = Q.modal({
+      title: 'بحث عن صنف', width: 640, onClose: focusSearch,
+      body: `<input class="input big-in" id="fq" placeholder="اكتب جزءاً من اسم الصنف أو الرمز…" autocomplete="off"><div class="find-l" id="fl"></div>
+        <div class="muted" style="font-size:12px;margin-top:6px"><span class="kbd">↑↓</span> للتنقل · <span class="kbd">Enter</span> للإضافة · <span class="kbd">Esc</span> للإغلاق</div>`,
+    });
+    const draw = () => {
+      const q = norm(m.$('#fq').value).toLowerCase();
+      list = q ? S.products.filter((p) => p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q) || (p.sku || '').toLowerCase().includes(q)).slice(0, 60) : S.products.slice(0, 60);
+      cur = Math.min(cur, Math.max(0, list.length - 1));
+      m.$('#fl').innerHTML = list.length ? list.map((p, i) => `<div class="fi ${i === cur ? 'on' : ''}" data-i="${i}"><div class="grow"><b>${esc(p.name)}</b><div class="faint mono" style="font-size:11.5px">${esc(p.barcode || '')} ${p.category ? '· ' + esc(String(p.category).split(' › ').slice(-2).join(' › ')) : ''}</div></div>
+        <span class="faint num">${Q.qty(p.stock)} ${esc(p.unit || '')}</span><b class="num pr">${fmt(p.price)}</b></div>`).join('') : '<div class="empty">لا توجد نتائج</div>';
+      m.$$('.fi').forEach((r) => (r.onclick = () => { m.close(); add(list[Number(r.dataset.i)]); }));
+      m.$('.fi.on')?.scrollIntoView({ block: 'nearest' });
+    };
+    m.$('#fq').oninput = () => { cur = 0; draw(); };
+    m.$('#fq').onkeydown = (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); cur = Math.min(list.length - 1, cur + 1); draw(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cur = Math.max(0, cur - 1); draw(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (list[cur]) { const p = list[cur]; m.close(); add(p); } }
+    };
+    draw(); m.$('#fq').focus();
+  }
+
+  // دفع نقدي سريع بالمبلغ الكامل (بدون باقٍ)
+  let quickBusy = false;
+  async function quickCash() {
+    if (!S.cart.length || quickBusy) return;
+    if (!S.shift && Q.settings.pos.require_shift) return openShift();
+    const t = totals();
+    quickBusy = true;
+    try {
+      const inv = await Q.post('/invoices', { source: 'pos', customer_id: S.customer?.id || null, discount: S.discount, items: S.cart.map((l) => ({ product_id: l.id, qty: l.qty, price: l.price, discount: l.discount })), paid_cash: t.total, tendered: t.total });
+      reset();
+      if (Q.settings.pos.auto_print) Q.print.run(Q.print.thermal(inv), { copies: Q.settings.print_thermal.copies || 1 });
+      msg(`<b class="ok">تمت الفاتورة ${esc(inv.number)}</b> <span class="sp"></span><b class="num">${fmt(inv.total)}</b> <span class="muted">نقداً</span>`, 'ok');
+      refreshShift();
+    } catch (e) { Q.err(e); } finally { quickBusy = false; focusSearch(); }
+  }
 
   function editLine(i) {
     const l = S.cart[i];
@@ -196,7 +289,7 @@
       body: `<div class="fgrid"><label class="f"><span>الكمية</span><input class="input num big-in" type="number" step="any" id="eq" value="${l.qty}"></label>
         <label class="f"><span>السعر${can('cashier_edit_price') ? '' : ' (غير قابل للتعديل)'}</span><input class="input num big-in" type="number" step="any" id="ep" value="${l.price}" ${can('cashier_edit_price') ? '' : 'readonly tabindex="-1" style="background:#f4f5f7"'}></label>
         ${can('cashier_discount') ? `<label class="f full"><span>خصم على السطر (مبلغ)${maxDisc() ? ` — الحد ${maxDisc()}%` : ''}</span><input class="input num" type="number" step="any" id="ed" value="${l.discount || ''}" placeholder="0"></label>` : ''}</div>`,
-      foot: '<button class="btn primary" data-ok>تحديث</button><button class="btn danger" data-rm>حذف الصنف</button><button class="btn" data-c>إلغاء</button>',
+      foot: '<button class="btn primary" data-ok>تحديث <span class="kbd inv">Enter</span></button><button class="btn danger" data-rm>حذف الصنف</button><button class="btn" data-c>إلغاء</button>',
       onClose: focusSearch,
     });
     m.$('#eq').select();
@@ -206,6 +299,7 @@
         const price = can('cashier_edit_price') ? Number(m.$('#ep').value) || 0 : l.price;
         const disc = m.$('#ed') ? Math.min(Number(m.$('#ed').value) || 0, q * price) : 0;
         if (maxDisc() && disc > (q * price * maxDisc()) / 100 + 0.01) return Q.toast(`الحد الأعلى للخصم ${maxDisc()}%`, 'err');
+        if (!Q.settings.pos.allow_negative_stock && q > l.stock) return Q.toast(`الكمية المتوفرة ${Q.qty(l.stock)} فقط`, 'err');
         if (price !== l.price) l.edited = true;
         l.qty = q; l.price = price; l.discount = disc;
       }
@@ -478,12 +572,21 @@
   // ===== اختصارات لوحة المفاتيح =====
   document.addEventListener('keydown', (e) => {
     if (!S.user || !Q.$('.pos')) return;
-    if (document.querySelector('.modal-bg')) return;
-    if (e.key === 'F2') { e.preventDefault(); Q.$('#q').focus(); }
-    else if (e.key === 'F4') { e.preventDefault(); hold(); }
-    else if (e.key === 'F8') { e.preventDefault(); pickCustomer(); }
-    else if (e.key === 'F9') { e.preventDefault(); pay(); }
-    else if (e.key.length === 1 && document.activeElement.tagName !== 'INPUT') Q.$('#q').focus();
+    if (modalOpen()) return;
+    const k = e.key;
+    if (k === 'F2' || k === 'F3') { e.preventDefault(); if (k === 'F3') findDlg(); else focusSearch(); }
+    else if (k === 'F4') { e.preventDefault(); hold(); }
+    else if (k === 'F6') { e.preventDefault(); discountDlg(); }
+    else if (k === 'F7') { e.preventDefault(); returnLookup(); }
+    else if (k === 'F8') { e.preventDefault(); pickCustomer(); }
+    else if (k === 'F9') { e.preventDefault(); pay(); }
+    else if (k === 'F10') { e.preventDefault(); quickCash(); }
+    else if (document.activeElement !== Q.$('#scan') && (k.length === 1 || k === 'Enter' || k === 'ArrowUp' || k === 'ArrowDown' || k === 'Delete')) {
+      // أي ضغطة (ومنها جهاز الباركود) تذهب لحقل المسح حتى لو فقد المؤشر
+      const sc = Q.$('#scan'); sc.focus();
+      if (k.length === 1) { e.preventDefault(); sc.value += k; sc.dispatchEvent(new Event('input')); }
+      else { e.preventDefault(); onScanKey({ key: k, target: sc, preventDefault() {} }); }
+    }
   });
 
   start();
