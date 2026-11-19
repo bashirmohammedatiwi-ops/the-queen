@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EP = 3970 + Math.floor(Math.random() * 5), WP = 3980 + Math.floor(Math.random() * 5);
 const KEY = 'k_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + 'xxxxxxxx';
 const ED = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-erp-')), WD = fs.mkdtempSync(path.join(os.tmpdir(), 'tq-web-'));
