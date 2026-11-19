@@ -42,75 +42,9 @@
     },
   });
 
-  // ===== الأصناف =====
-  let cats = [];
-  const productFields = (isNew) => [
-    { n: 'name', t: 'اسم الصنف', req: 1, full: 1 },
-    { n: 'barcode', t: 'الباركود', hint: isNew ? 'اتركه فارغاً لتوليده تلقائياً' : '' },
-    { n: 'sku', t: 'الرمز الداخلي (SKU)' },
-    { n: 'category_id', t: 'التصنيف', type: 'select', options: ERP.options(cats, 'name', 'بدون تصنيف') },
-    { n: 'unit', t: 'الوحدة', def: 'حبة' },
-    { n: 'price', t: 'سعر البيع', type: 'number', req: 1, hint: Q.settings.tax.enabled ? (Q.settings.tax.inclusive ? 'شامل الضريبة' : 'غير شامل الضريبة') : '' },
-    { n: 'cost', t: 'سعر التكلفة', type: 'number', ro: !isNew, hint: isNew ? 'يتحدث تلقائياً بمتوسط سعر الشراء' : 'يُحسب تلقائياً من فواتير الشراء' },
-    ...(isNew ? [{ n: 'opening_stock', t: 'الكمية الافتتاحية', type: 'number', def: 0 }] : []),
-    { n: 'min_stock', t: 'حد إعادة الطلب', type: 'number', def: 0 },
-    { n: 'notes', t: 'ملاحظات', full: 1 },
-    ...(isNew ? [] : [{ n: 'active', t: 'صنف نشط (يظهر في نقطة البيع)', type: 'checkbox', full: 1 }]),
-  ];
-  ERP.productForm = async (p, after) => {
-    cats = await Q.get('/categories');
-    ERP.form({
-      title: p ? 'تعديل صنف' : 'صنف جديد', fields: productFields(!p), data: p || { active: 1 },
-      onSave: async (o) => {
-        const r = p ? await Q.put('/products/' + p.id, o) : await Q.post('/products', o);
-        Q.toast('تم الحفظ', 'ok'); after?.(r);
-      },
-    });
-  };
-  ERP.page('/products', {
-    title: 'الأصناف',
-    async render(v, prm) {
-      cats = await Q.get('/categories');
-      const st = { q: '', cat: '', low: prm.low ? 1 : '', all: '' };
-      ERP.head('الأصناف', '', `<button class="btn" id="im2">${icon('list')} استيراد من Excel</button><button class="btn" id="imp">${icon('download')} تصدير</button><button class="btn primary" id="add">${icon('plus')} صنف جديد</button>`);
-      v.innerHTML = `<div class="bar"><input class="input search" placeholder="بحث بالاسم أو الباركود…" id="q">
-        <select class="input" id="cat" style="width:170px">${ERP.options(cats, 'name', 'كل التصنيفات').map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select>
-        <label class="chk"><input type="checkbox" id="low" ${st.low ? 'checked' : ''}> الأصناف المنخفضة فقط</label>
-        <label class="chk"><input type="checkbox" id="all"> إظهار المؤرشفة</label><span class="sp"></span><span class="muted" id="cnt"></span></div>
-        <div class="card tbl-wrap" id="list"></div>`;
-      let rows = [];
-      const load = async () => {
-        rows = await Q.get('/products' + Q.qs({ q: st.q, category_id: st.cat, low: st.low, active: st.all ? 'all' : '' }));
-        Q.$('#cnt').textContent = `${rows.length} صنف`;
-        Q.$('#list').innerHTML = T([
-          { k: 'name', t: 'الصنف', f: (x, r) => `<b>${esc(x)}</b>${r.active ? '' : ' <span class="tag">مؤرشف</span>'}` },
-          { k: 'barcode', t: 'الباركود', f: (x) => `<span class="mono muted">${esc(x || '')}</span>` },
-          { k: 'category', t: 'التصنيف', f: (x) => esc(x || '—') },
-          { k: 'cost', t: 'التكلفة', n: 1 }, { k: 'price', t: 'سعر البيع', n: 1 },
-          { k: 'stock', t: 'المخزون', cls: 'n', f: (x, r) => `<span class="${x <= 0 ? 'err' : x <= r.min_stock ? 'warn' : ''} b">${Q.qty(x)}</span> <span class="faint">${esc(r.unit || '')}</span>` },
-          { k: 'id', t: '', cls: 'act', f: (x) => `<div class="row"><button class="btn sm" data-adj="${x}" title="تسوية الكمية">جرد</button><button class="btn sm ghost" data-ed="${x}">${icon('edit', 14)}</button><button class="btn sm ghost danger" data-del="${x}">${icon('trash', 14)}</button></div>` },
-        ], rows, { click: 1, empty: 'لا توجد أصناف — أضف أول صنف' });
-        ERP.bindRows(Q.$('#list'), rows, (r) => ERP.go('/product/' + r.id));
-        Q.$$('[data-ed]').forEach((b) => (b.onclick = () => ERP.productForm(rows.find((r) => r.id == b.dataset.ed), load)));
-        Q.$$('[data-adj]').forEach((b) => (b.onclick = () => adjust(rows.find((r) => r.id == b.dataset.adj), load)));
-        Q.$$('[data-del]').forEach((b) => (b.onclick = async () => {
-          if (!(await Q.confirm('حذف هذا الصنف؟ إن كانت عليه حركات سيتم أرشفته بدلاً من الحذف.', { danger: true, ok: 'حذف' }))) return;
-          try { const r = await Q.del('/products/' + b.dataset.del); Q.toast(r.archived ? 'تمت الأرشفة' : 'تم الحذف', 'ok'); load(); } catch (e) { Q.err(e); }
-        }));
-      };
-      Q.$('#q').oninput = Q.debounce((e) => { st.q = e.target.value; load(); });
-      Q.$('#cat').onchange = (e) => { st.cat = e.target.value; load(); };
-      Q.$('#low').onchange = (e) => { st.low = e.target.checked ? 1 : ''; load(); };
-      Q.$('#all').onchange = (e) => { st.all = e.target.checked; load(); };
-      Q.$('#add').onclick = () => ERP.productForm(null, load);
-      Q.$('#imp').onclick = () => downloadCsv('products.csv', rows.map((r) => [r.name, r.barcode, r.category || '', r.unit, r.cost, r.price, r.stock, r.min_stock]));
-      Q.$('#im2').onclick = () => importDlg(load);
-      Q.$('#q').focus();
-      load();
-    },
-  });
+  // صفحة الأصناف وبطاقة الصنف وشجرة المواد في pages-items.js
   // ===== استيراد / تصدير الأصناف =====
-  const COLS = ['الاسم', 'الباركود', 'التصنيف', 'الوحدة', 'التكلفة', 'سعر البيع', 'الكمية', 'حد إعادة الطلب'];
+  const COLS = ['الاسم', 'الباركود', 'العائدية', 'الوحدة', 'التكلفة', 'سعر البيع', 'الكمية', 'حد إعادة الطلب'];
   const KEYS = ['name', 'barcode', 'category', 'unit', 'cost', 'price', 'stock', 'min_stock'];
   function downloadCsv(name, data) {
     const csv = [COLS, ...data].map((r) => r.map((x) => `"${String(x ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
@@ -131,6 +65,8 @@
     if (cell || row.length) { row.push(cell); rows.push(row); }
     return rows.filter((r) => r.some((c) => c.trim()));
   }
+  ERP.importProducts = (after) => importDlg(after);
+  ERP.productsCsv = (name, data) => downloadCsv(name, data);
   function importDlg(after) {
     let data = [];
     const m = Q.modal({
@@ -144,14 +80,14 @@
         <div id="pv" style="margin-top:12px;max-height:300px;overflow:auto"></div>`,
       foot: '<button class="btn primary" data-ok disabled>استيراد</button><button class="btn" data-c>إلغاء</button>',
     });
-    m.$('#tpl').onclick = (e) => { e.preventDefault(); downloadCsv('the-queen-products-template.csv', [['عطر الملكة 100 مل', '', 'عطور', 'حبة', 18000, 35000, 10, 3], ['كريم مرطب', '6281234567890', 'العناية بالبشرة', 'حبة', 6000, 12000, 24, 5]]); };
+    m.$('#tpl').onclick = (e) => { e.preventDefault(); downloadCsv('the-queen-products-template.csv', [['عطر الملكة 100 مل', '', 'عطور / نسائية', 'حبة', 18000, 35000, 10, 3], ['كريم مرطب', '6281234567890', 'العناية بالبشرة / كريمات', 'حبة', 6000, 12000, 24, 5]]); };
     m.$('[data-c]').onclick = m.close;
     m.$('#fl').onchange = async (e) => {
       const f = e.target.files[0]; if (!f) return;
       m.$('#fn').textContent = f.name;
       const rows = parseCsv(await f.text());
       const head = rows[0].map((h) => h.trim());
-      const idx = KEYS.map((k, i) => { const j = head.indexOf(COLS[i]); return j >= 0 ? j : head.includes('الاسم') ? -1 : i; });
+      const idx = KEYS.map((k, i) => { const j = head.indexOf(COLS[i]) >= 0 ? head.indexOf(COLS[i]) : i === 2 ? head.indexOf('التصنيف') : -1; return j >= 0 ? j : head.includes('الاسم') ? -1 : i; });
       data = rows.slice(head.includes('الاسم') ? 1 : 0).map((r) => Object.fromEntries(KEYS.map((k, i) => [k, idx[i] >= 0 ? (r[idx[i]] || '').trim() : ''])));
       m.$('#pv').innerHTML = `<div class="muted" style="margin-bottom:6px">${data.length} صنف في الملف — معاينة أول 50:</div>` + T(KEYS.map((k, i) => ({ k, t: COLS[i] })), data.slice(0, 50));
       m.$('[data-ok]').disabled = !data.length;
@@ -168,6 +104,7 @@
     };
   }
 
+  ERP.adjustStock = (p, after) => adjust(p, after);
   function adjust(p, after) {
     ERP.form({
       title: `جرد / تسوية: ${p.name}`, cols: 1, width: 420,
@@ -199,21 +136,6 @@
       Q.$('#ed').onclick = () => ERP.productForm(p, () => ERP.reload());
       Q.$('#adj').onclick = () => adjust(p, () => ERP.reload());
       Q.$('#lbl').onclick = () => ERP.go('/labels?id=' + p.id);
-    },
-  });
-
-  // ===== التصنيفات =====
-  ERP.page('/categories', {
-    title: 'التصنيفات',
-    async render(v) {
-      ERP.head('التصنيفات', 'تظهر كتبويبات في نقطة البيع', `<button class="btn primary" id="add">${icon('plus')} تصنيف جديد</button>`);
-      const rows = await Q.get('/categories');
-      const fields = [{ n: 'name', t: 'اسم التصنيف', req: 1 }, { n: 'sort', t: 'الترتيب', type: 'number', def: 0 }];
-      v.innerHTML = `<div class="card" style="max-width:700px">${T([{ k: 'name', t: 'التصنيف', f: (x) => `<b>${esc(x)}</b>` }, { k: 'products', t: 'عدد الأصناف', cls: 'n', f: (x) => x },
-        { k: 'sort', t: 'الترتيب', cls: 'n', f: (x) => x }, { k: 'id', t: '', cls: 'act', f: (x) => `<div class="row"><button class="btn sm ghost" data-ed="${x}">${icon('edit', 14)}</button><button class="btn sm ghost danger" data-del="${x}">${icon('trash', 14)}</button></div>` }], rows)}</div>`;
-      Q.$('#add').onclick = () => ERP.form({ title: 'تصنيف جديد', fields, width: 420, onSave: async (o) => { await Q.post('/categories', o); ERP.reload(); } });
-      Q.$$('[data-ed]').forEach((b) => (b.onclick = () => ERP.form({ title: 'تعديل تصنيف', fields, width: 420, data: rows.find((r) => r.id == b.dataset.ed), onSave: async (o) => { await Q.put('/categories/' + b.dataset.ed, o); ERP.reload(); } })));
-      Q.$$('[data-del]').forEach((b) => (b.onclick = async () => { if (await Q.confirm('حذف التصنيف؟ الأصناف ستبقى بدون تصنيف.', { danger: true, ok: 'حذف' })) { await Q.del('/categories/' + b.dataset.del); ERP.reload(); } }));
     },
   });
 

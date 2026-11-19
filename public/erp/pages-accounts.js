@@ -178,7 +178,8 @@
       <div class="grid2e"><div class="card"><div class="card-h"><h3>المبيعات حسب الصنف</h3></div><div class="tbl-wrap" style="max-height:460px">${T([{ k: 'name', t: 'الصنف' }, { k: 'qty', t: 'الكمية', cls: 'n', f: Q.qty }, { k: 'total', t: 'المبيعات', n: 1 },
         { k: 'cost', t: 'الربح', cls: 'n', f: (x, p) => fmt(p.total - x) }], r.byProduct)}</div></div>
       <div><div class="card"><div class="card-h"><h3>حسب اليوم</h3></div>${T([{ k: 'd', t: 'اليوم' }, { k: 'n', t: 'عدد الفواتير', cls: 'n', f: (x) => x }, { k: 'total', t: 'الصافي', n: 1 }], r.byDay, { foot: { d: 'الإجمالي', total: r.net } })}</div>
-      <div class="card" style="margin-top:14px"><div class="card-h"><h3>حسب التصنيف</h3></div>${T([{ k: 'name', t: 'التصنيف' }, { k: 'qty', t: 'الكمية', cls: 'n', f: Q.qty }, { k: 'total', t: 'الصافي', n: 1 }], r.byCategory)}</div>
+      <div class="card" style="margin-top:14px"><div class="card-h"><h3>حسب الفرع الرئيسي</h3></div>${T([{ k: 'name', t: 'الفرع' }, { k: 'qty', t: 'الكمية', cls: 'n', f: Q.qty }, { k: 'total', t: 'الصافي', n: 1 }, { k: 'cost', t: 'الربح', cls: 'n', f: (x, p) => fmt(p.total - x) }], r.byRoot || [])}</div>
+      <div class="card" style="margin-top:14px"><div class="card-h"><h3>حسب شجرة المواد (تفصيلي)</h3></div>${T([{ k: 'name', t: 'العائدية' }, { k: 'qty', t: 'الكمية', cls: 'n', f: Q.qty }, { k: 'total', t: 'الصافي', n: 1 }], r.byCategory)}</div>
       <div class="card" style="margin-top:14px"><div class="card-h"><h3>حسب المستخدم</h3></div>${T([{ k: 'name', t: 'المستخدم' }, { k: 'n', t: 'العمليات', cls: 'n', f: (x) => x }, { k: 'total', t: 'الصافي', n: 1 }], r.byUser)}</div></div></div>`;
   });
 
@@ -208,9 +209,11 @@
   });
   reportPage('/reports/inventory', 'تقييم المخزون', async () => {
     const r = await Q.get('/reports/inventory');
+    const roots = {}; for (const x of r.rows) { const k = x.root || 'بدون عائدية'; roots[k] = roots[k] || { name: k, n: 0, value: 0, retail: 0 }; roots[k].n++; roots[k].value += x.value; roots[k].retail += x.retail; }
     return `<div class="stats"><div class="stat"><div class="k">قيمة المخزون بالتكلفة</div><div class="v">${fmt(r.total_cost)}</div></div>
       <div class="stat"><div class="k">قيمة المخزون بسعر البيع</div><div class="v">${fmt(r.total_retail)}</div></div><div class="stat"><div class="k">الربح المتوقع</div><div class="v ok">${fmt(r.total_retail - r.total_cost)}</div></div></div>
-      <div class="card tbl-wrap">${T([{ k: 'name', t: 'الصنف' }, { k: 'barcode', t: 'الباركود', f: (x) => `<span class="mono">${esc(x || '')}</span>` }, { k: 'category', t: 'التصنيف' },
+      <div class="card" style="margin-bottom:14px"><div class="card-h"><h3>حسب الفرع الرئيسي</h3></div>${T([{ k: 'name', t: 'الفرع' }, { k: 'n', t: 'الأصناف', cls: 'n', f: (x) => x }, { k: 'value', t: 'القيمة بالتكلفة', n: 1 }, { k: 'retail', t: 'القيمة بالبيع', n: 1 }], Object.values(roots).sort((a, b) => b.value - a.value))}</div>
+      <div class="card tbl-wrap">${T([{ k: 'name', t: 'الصنف' }, { k: 'barcode', t: 'الباركود', f: (x) => `<span class="mono">${esc(x || '')}</span>` }, { k: 'category', t: 'العائدية' },
         { k: 'stock', t: 'الكمية', cls: 'n', f: (x, p) => `<span class="${x <= p.min_stock ? 'warn b' : ''}">${Q.qty(x)}</span>` }, { k: 'cost', t: 'التكلفة', n: 1 }, { k: 'price', t: 'السعر', n: 1 },
         { k: 'value', t: 'القيمة بالتكلفة', n: 1 }, { k: 'retail', t: 'القيمة بالبيع', n: 1 }], r.rows, { foot: { name: 'الإجمالي', value: r.total_cost, retail: r.total_retail } })}</div>`;
   }, { range: false });

@@ -9,7 +9,7 @@
     ['المبيعات', [['/sales/new', 'فاتورة بيع جديدة', 'plus'], ['/sales', 'فواتير المبيعات', 'file'], ['/customers', 'العملاء', 'users'], ['/receipts', 'سندات القبض', 'wallet']]],
     ['المتجر الإلكتروني', [['/web/orders', 'طلبات الموقع', 'cart'], ['/web/products', 'منتجات الموقع', 'tag'], ['/web/catalog', 'الأقسام والبراندات', 'box'], ['/web/banners', 'البنرات', 'image'], ['/web/settings', 'محتوى الموقع والربط', 'gear']]],
     ['المشتريات', [['/purchases/new', 'فاتورة شراء جديدة', 'plus'], ['/purchases', 'فواتير المشتريات', 'truck'], ['/suppliers', 'الموردين', 'users'], ['/payments', 'سندات الصرف', 'wallet']]],
-    ['المخزون', [['/products', 'الأصناف', 'box'], ['/categories', 'التصنيفات', 'tag'], ['/stock', 'حركة المخزون', 'layers'], ['/labels', 'طباعة الباركود', 'barcode']]],
+    ['المخزون', [['/products', 'الأصناف', 'box'], ['/categories', 'شجرة المواد', 'tree'], ['/stock', 'حركة المخزون', 'layers'], ['/labels', 'طباعة الباركود', 'barcode']]],
     ['المحاسبة', [['/accounts', 'دليل الحسابات', 'book'], ['/journal', 'القيود اليومية', 'list'], ['/expenses', 'المصروفات', 'cash'], ['/ledger', 'كشف حساب', 'file']]],
     ['التقارير', [['/reports/sales', 'تقرير المبيعات', 'chart'], ['/reports/income', 'الأرباح والخسائر', 'chart'], ['/reports/balance', 'الميزانية العمومية', 'book'], ['/reports/trial', 'ميزان المراجعة', 'list'], ['/reports/inventory', 'تقييم المخزون', 'box'], ['/shifts', 'ورديات الكاشير', 'clock']]],
     ['الإعدادات', [['/settings', 'المتجر والضريبة', 'gear'], ['/print', 'إعدادات الطباعة', 'printer'], ['/users', 'المستخدمين', 'user']]],

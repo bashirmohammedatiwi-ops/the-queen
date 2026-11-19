@@ -118,12 +118,21 @@
 
   function drawCats() {
     const el = Q.$('#cats');
-    el.innerHTML = `<button data-c="" class="${S.cat === '' ? 'on' : ''}">الكل</button>` + S.cats.filter((c) => c.products > 0).map((c) => `<button data-c="${c.id}" class="${S.cat == c.id ? 'on' : ''}">${esc(c.name)}</button>`).join('');
+    // شجرة المواد: الفروع الرئيسية، وعند اختيار فرع يظهر مساره وفروعه التابعة
+    const has = (c) => (c.total ?? c.products) > 0;
+    const byId = (id) => S.cats.find((c) => c.id == id);
+    const kids = (id) => S.cats.filter((c) => (c.parent_id || null) == (id || null) && has(c));
+    const path = []; for (let x = byId(S.cat); x; x = byId(x.parent_id)) path.unshift(x);
+    const btn = (c, on, cls = '') => `<button data-c="${c.id}" class="${on ? 'on' : ''} ${cls}">${esc(c.name)}</button>`;
+    el.innerHTML = `<button data-c="" class="${S.cat === '' ? 'on' : ''}">الكل</button>`
+      + (path.length ? path.map((c, i) => btn(c, i === path.length - 1, 'crumb')).join('<span class="sepc">›</span>') + (kids(S.cat).length ? '<span class="sepc">|</span>' + kids(S.cat).map((c) => btn(c, false)).join('') : '')
+        : kids(null).map((c) => btn(c, false)).join(''));
     el.querySelectorAll('button').forEach((b) => (b.onclick = () => { S.cat = b.dataset.c; drawCats(); drawGrid(); focusSearch(); }));
   }
   const filtered = () => {
     const q = S.q.toLowerCase();
-    return S.products.filter((p) => (!S.cat || p.category_id == S.cat) && (!q || p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q) || (p.sku || '').toLowerCase().includes(q)));
+    const sub = new Set(); if (S.cat) { sub.add(Number(S.cat)); for (let grew = true; grew;) { grew = false; for (const c of S.cats) if (c.parent_id && sub.has(c.parent_id) && !sub.has(c.id)) { sub.add(c.id); grew = true; } } }
+    return S.products.filter((p) => (!S.cat || sub.has(p.category_id)) && (!q || p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q) || (p.sku || '').toLowerCase().includes(q)));
   };
   function drawGrid() {
     const el = Q.$('#grid'); if (!el) return;

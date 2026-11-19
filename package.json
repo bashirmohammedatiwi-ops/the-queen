@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node --no-warnings server.js",
-    "test": "node --no-warnings tests/e2e.mjs && node --no-warnings tests/web-sync.mjs"
+    "test": "node --no-warnings tests/e2e.mjs && node --no-warnings tests/tree.mjs && node --no-warnings tests/web-sync.mjs"
   },
   "engines": {
     "node": ">=22.13"

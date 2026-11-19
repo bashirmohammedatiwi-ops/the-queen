@@ -16,6 +16,8 @@ input, textarea { user-select: text; }
 .cats { display: flex; gap: 6px; padding: 10px 12px; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid var(--line); background: #fbfbfc; }
 .cats button { height: 30px; padding: 0 13px; border: 1px solid var(--line); background: #fff; border-radius: 15px; font: inherit; font-weight: 500; cursor: pointer; white-space: nowrap; color: #3b414b; }
 .cats button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cats button.crumb:not(.on) { background: var(--accent-bg, #f3e9ec); border-color: transparent; color: var(--accent); }
+.cats .sepc { align-self: center; color: #b7bcc4; flex: none; }
 .grid { flex: 1; overflow: auto; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; align-content: start; }
 .tile { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px; cursor: pointer; text-align: right; font: inherit; display: flex; flex-direction: column; gap: 6px; min-height: 84px; transition: border-color .1s, box-shadow .1s; }
 .tile:hover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-bg); }

@@ -8,7 +8,7 @@ import dgram from 'node:dgram';
 import { MEDIA_DIR, saveMedia, reservedQty, syncNow, pushSoon, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent, onRemoteChange } from './lib/web-sync.js';
 import {
   db, all, get, run, tx, round, today, localNow, ROOT, DATA_DIR,
-  getSettings, saveSettings, hashPassword, checkPassword,
+  getSettings, saveSettings, hashPassword, checkPassword, subtreeSql,
 } from './lib/db.js';
 import {
   HttpError, bad, fmtNo, acc, postEntry, createSale, createReturn, createPurchase,
@@ -119,34 +119,80 @@ function saveUser(id, b) {
 }
 
 // ===== التصنيفات =====
-route('GET', '/api/categories', ANY, () => all(`SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id=c.id AND p.active=1) products
-  FROM categories c ORDER BY sort, name`));
+// شجرة المواد: كل فرع له أب ورمز ومسار كامل، والعدد يشمل الفروع التابعة
+function categoryTree() {
+  const rows = all('SELECT c.id, c.name, c.parent_id, c.code, c.sort, cp.path, cp.depth, cp.root_id FROM categories c LEFT JOIN cat_paths cp ON cp.id=c.id ORDER BY c.sort, c.code, c.name');
+  const direct = new Map(all('SELECT category_id id, COUNT(*) n, SUM(stock*cost) v FROM products WHERE active=1 GROUP BY category_id').map((r) => [r.id, r]));
+  const by = new Map(rows.map((r) => [r.id, { ...r, products: direct.get(r.id)?.n || 0, value: direct.get(r.id)?.v || 0, total: 0, total_value: 0, children: 0 }]));
+  for (const r of by.values()) if (r.parent_id && by.has(r.parent_id)) by.get(r.parent_id).children++;
+  for (const r of by.values()) { let x = r, guard = 0; while (x && guard++ < 50) { x.total += r.products; x.total_value += r.value; x = x.parent_id ? by.get(x.parent_id) : null; } }
+  return [...by.values()].map((r) => ({ ...r, path: r.path || r.name, total_value: round(r.total_value) }));
+}
+const subtreeIds = (id) => all(subtreeSql, Number(id)).map((r) => r.id);
+function nextCatCode(parent) {
+  const pc = parent ? get('SELECT code FROM categories WHERE id=?', parent)?.code || '' : '';
+  const codes = all(`SELECT code FROM categories WHERE ${parent ? 'parent_id=?' : 'parent_id IS NULL'}`, ...(parent ? [parent] : [])).map((r) => r.code || '');
+  let n = 1; while (codes.includes(pc + String(n).padStart(2, '0'))) n++;
+  return pc + String(n).padStart(2, '0');
+}
+function checkCatName(name, parent, self) {
+  if (!name) throw bad('اكتب اسم الفرع');
+  if (get(`SELECT 1 FROM categories WHERE name=? AND ${parent ? 'parent_id=?' : 'parent_id IS NULL'} AND id<>?`, name, ...(parent ? [parent] : []), self || 0)) throw bad('يوجد فرع بنفس الاسم في هذا المستوى');
+}
+route('GET', '/api/categories', ANY, () => categoryTree());
 route('POST', '/api/categories', ADMIN, ({ body }) => {
-  if (!body.name) throw bad('الاسم مطلوب');
-  const id = run('INSERT INTO categories(name,sort) VALUES(?,?)', body.name, Number(body.sort) || 0).lastInsertRowid;
-  broadcast('products'); return get('SELECT * FROM categories WHERE id=?', id);
+  const name = String(body.name || '').trim(), parent = Number(body.parent_id) || null;
+  if (parent && !get('SELECT 1 FROM categories WHERE id=?', parent)) throw bad('الفرع الأب غير موجود');
+  checkCatName(name, parent);
+  const code = String(body.code || '').trim() || nextCatCode(parent);
+  if (get('SELECT 1 FROM categories WHERE code=?', code)) throw bad('الرمز مستخدم لفرع آخر');
+  const id = run('INSERT INTO categories(name,parent_id,code,sort) VALUES(?,?,?,?)', name, parent, code, Number(body.sort) || 0).lastInsertRowid;
+  broadcast('products'); return categoryTree().find((c) => c.id === Number(id));
 });
 route('PUT', '/api/categories/:id', ADMIN, ({ body, params }) => {
-  run('UPDATE categories SET name=?, sort=? WHERE id=?', body.name, Number(body.sort) || 0, params.id);
-  broadcast('products'); return get('SELECT * FROM categories WHERE id=?', params.id);
+  const c = get('SELECT * FROM categories WHERE id=?', params.id); if (!c) throw new HttpError(404, 'الفرع غير موجود');
+  const name = String(body.name ?? c.name).trim();
+  const parent = 'parent_id' in body ? Number(body.parent_id) || null : c.parent_id;
+  if (parent && subtreeIds(c.id).includes(parent)) throw bad('لا يمكن نقل الفرع داخل نفسه أو داخل أحد فروعه');
+  if (parent && !get('SELECT 1 FROM categories WHERE id=?', parent)) throw bad('الفرع الأب غير موجود');
+  checkCatName(name, parent, c.id);
+  let code = String(body.code ?? c.code ?? '').trim();
+  if (parent !== c.parent_id && (!body.code || body.code === c.code)) code = nextCatCode(parent);
+  if (code && get('SELECT 1 FROM categories WHERE code=? AND id<>?', code, c.id)) throw bad('الرمز مستخدم لفرع آخر');
+  tx(() => {
+    run('UPDATE categories SET name=?, parent_id=?, code=?, sort=? WHERE id=?', name, parent, code || null, Number(body.sort ?? c.sort) || 0, c.id);
+    // إعادة ترميز الفروع التابعة عند تغيير رمز الأب
+    if (code !== c.code) {
+      const recode = (pid, pcode) => all('SELECT id FROM categories WHERE parent_id=? ORDER BY sort, code, name', pid).forEach((k, i) => { const kc = pcode + String(i + 1).padStart(2, '0'); run('UPDATE categories SET code=? WHERE id=?', kc, k.id); recode(k.id, kc); });
+      recode(c.id, code);
+    }
+  });
+  broadcast('products'); return categoryTree().find((x) => x.id === c.id);
 });
-route('DELETE', '/api/categories/:id', ADMIN, ({ params }) => {
-  run('UPDATE products SET category_id=NULL WHERE category_id=?', params.id);
-  run('DELETE FROM categories WHERE id=?', params.id); broadcast('products'); return { ok: true };
+route('DELETE', '/api/categories/:id', ADMIN, ({ params, query }) => {
+  const id = Number(params.id);
+  if (get('SELECT 1 FROM categories WHERE parent_id=? LIMIT 1', id)) throw bad('هذا الفرع يحتوي فروعاً تابعة — انقلها أو احذفها أولاً');
+  const to = Number(query.move_to) || null;
+  if (to && (to === id || !get('SELECT 1 FROM categories WHERE id=?', to))) throw bad('الفرع البديل غير صحيح');
+  const n = get('SELECT COUNT(*) n FROM products WHERE category_id=?', id).n;
+  if (n && !to && query.force !== '1') throw bad(`يوجد ${n} صنف في هذا الفرع — اختر فرعاً لنقلها إليه`);
+  tx(() => { run('UPDATE products SET category_id=? WHERE category_id=?', to, id); run('DELETE FROM categories WHERE id=?', id); });
+  broadcast('products'); return { ok: true, moved: n };
 });
 
 // ===== المنتجات =====
 route('GET', '/api/products', ANY, ({ query }) => {
   const w = []; const p = [];
   if (query.active !== 'all') w.push('p.active=1');
-  if (query.category_id) { w.push('p.category_id=?'); p.push(query.category_id); }
+  if (query.category_id === 'none') w.push('p.category_id IS NULL');
+  else if (query.category_id) { w.push(`p.category_id IN (${subtreeSql.replace('SELECT ?', 'SELECT ' + (Number(query.category_id) || 0))})`); }
   if (query.q) { w.push('(p.name LIKE ? OR p.barcode LIKE ? OR p.sku LIKE ?)'); p.push(`%${query.q}%`, `%${query.q}%`, `%${query.q}%`); }
   if (query.low) w.push('p.stock <= p.min_stock');
-  return all(`SELECT p.*, c.name category FROM products p LEFT JOIN categories c ON c.id=p.category_id
+  return all(`SELECT p.*, cp.path category, cp.code category_code FROM products p LEFT JOIN cat_paths cp ON cp.id=p.category_id
     ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY p.name`, ...p);
 });
 route('GET', '/api/products/:id', ADMIN, ({ params }) => {
-  const p = get('SELECT p.*, c.name category FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.id=?', params.id);
+  const p = get('SELECT p.*, cp.path category, cp.code category_code FROM products p LEFT JOIN cat_paths cp ON cp.id=p.category_id WHERE p.id=?', params.id);
   if (!p) throw new HttpError(404, 'الصنف غير موجود');
   p.moves = all(`SELECT m.*, u.name user_name FROM stock_moves m LEFT JOIN users u ON u.id=m.user_id WHERE product_id=? ORDER BY m.id DESC LIMIT 200`, params.id);
   return p;
@@ -171,6 +217,8 @@ route('DELETE', '/api/products/:id', ADMIN, ({ params }) => {
 });
 function saveProduct(id, b) {
   if (!b.name) throw bad('اسم الصنف مطلوب');
+  if (b.category_id && !get('SELECT 1 FROM categories WHERE id=?', b.category_id)) throw bad('العائدية (الفرع) غير موجودة');
+  if (b.sku && get('SELECT 1 FROM products WHERE sku=? AND id<>?', String(b.sku).trim(), id || 0)) throw bad('رمز الصنف مستخدم لصنف آخر');
   const f = [b.name.trim(), b.sku || null, (b.barcode || '').trim() || null, b.category_id || null, b.unit || 'حبة',
     round(b.cost), round(b.price), Number(b.min_stock) || 0, b.active === false || b.active === 0 ? 0 : 1, b.notes || null];
   try {
@@ -182,6 +230,15 @@ function saveProduct(id, b) {
       id = Number(run('INSERT INTO products(name,sku,barcode,category_id,unit,cost,price,min_stock,active,notes) VALUES(?,?,?,?,?,?,?,?,?,?)', ...f).lastInsertRowid);
     }
     if (!f[2]) run('UPDATE products SET barcode=? WHERE id=?', String(20000000 + id), id);
+    // رمز الصنف التلقائي من رمز الفرع: 0102-0007
+    if (!f[1] && f[3]) {
+      const cc = get('SELECT code FROM categories WHERE id=?', f[3])?.code;
+      if (cc && !get('SELECT sku FROM products WHERE id=?', id).sku) {
+        const used = new Set(all("SELECT sku FROM products WHERE sku LIKE ?", cc + '-%').map((r) => r.sku));
+        let n = 1; while (used.has(`${cc}-${String(n).padStart(4, '0')}`)) n++;
+        run('UPDATE products SET sku=? WHERE id=?', `${cc}-${String(n).padStart(4, '0')}`, id);
+      }
+    }
   } catch (e) { if (String(e.message).includes('UNIQUE')) throw bad('الباركود مستخدم لصنف آخر'); throw e; }
   return id;
 }
@@ -379,10 +436,17 @@ route('POST', '/api/products/import', ADMIN, ({ body, user }) => {
   if (!rows.length) throw bad('الملف لا يحتوي بيانات');
   const res = { created: 0, updated: 0, skipped: [] };
   tx(() => {
+    // العائدية: اسم فرع أو مسار كامل مثل «عطور / نسائية / أو دو برفيوم» — تُنشأ الفروع الناقصة تلقائياً
     const catId = (name) => {
-      name = String(name || '').trim(); if (!name) return null;
-      const c = get('SELECT id FROM categories WHERE name=?', name);
-      return c ? c.id : Number(run('INSERT INTO categories(name) VALUES(?)', name).lastInsertRowid);
+      const parts = String(name || '').split(/\s*[\/›>\\]\s*/).map((x) => x.trim()).filter(Boolean);
+      if (!parts.length) return null;
+      if (parts.length === 1) { const one = all('SELECT id FROM categories WHERE name=?', parts[0]); if (one.length === 1) return one[0].id; }
+      let parent = null;
+      for (const nm of parts) {
+        const c = get(`SELECT id FROM categories WHERE name=? AND ${parent ? 'parent_id=?' : 'parent_id IS NULL'}`, nm, ...(parent ? [parent] : []));
+        parent = c ? c.id : Number(run('INSERT INTO categories(name,parent_id,code) VALUES(?,?,?)', nm, parent, nextCatCode(parent)).lastInsertRowid);
+      }
+      return parent;
     };
     rows.forEach((r, i) => {
       const name = String(r.name || '').trim();
@@ -542,15 +606,18 @@ route('GET', '/api/reports/sales', ADMIN, ({ query }) => {
   const byProduct = all(`SELECT ii.product_id, ii.name, SUM(CASE WHEN i.type='sale' THEN ii.qty ELSE -ii.qty END) qty,
     SUM(CASE WHEN i.type='sale' THEN ii.total ELSE -ii.total END) total, SUM(CASE WHEN i.type='sale' THEN ii.qty*ii.cost ELSE -ii.qty*ii.cost END) cost
     FROM invoice_items ii JOIN invoices i ON i.id=ii.invoice_id WHERE ${W} GROUP BY ii.product_id, ii.name ORDER BY total DESC`, from, to);
-  const byCategory = all(`SELECT COALESCE(c.name,'بدون تصنيف') name, SUM(CASE WHEN i.type='sale' THEN ii.total ELSE -ii.total END) total,
-    SUM(CASE WHEN i.type='sale' THEN ii.qty ELSE -ii.qty END) qty FROM invoice_items ii JOIN invoices i ON i.id=ii.invoice_id
-    LEFT JOIN products p ON p.id=ii.product_id LEFT JOIN categories c ON c.id=p.category_id WHERE ${W} GROUP BY c.id ORDER BY total DESC`, from, to);
-  return { from, to, sales: s, returns: r, net, net_tax: netTax, net_cost: netCost, profit: round(net - netTax - netCost), byDay, byUser, byProduct, byCategory };
+  const catSel = (col) => `SELECT COALESCE(${col},'بدون عائدية') name, SUM(CASE WHEN i.type='sale' THEN ii.total ELSE -ii.total END) total,
+    SUM(CASE WHEN i.type='sale' THEN ii.qty ELSE -ii.qty END) qty, SUM(CASE WHEN i.type='sale' THEN ii.qty*ii.cost ELSE -ii.qty*ii.cost END) cost FROM invoice_items ii JOIN invoices i ON i.id=ii.invoice_id
+    LEFT JOIN products p ON p.id=ii.product_id LEFT JOIN cat_paths cp ON cp.id=p.category_id LEFT JOIN categories rc ON rc.id=cp.root_id WHERE ${W}`;
+  const byCategory = all(catSel('cp.path') + ' GROUP BY p.category_id ORDER BY total DESC', from, to);
+  const byRoot = all(catSel('rc.name') + ' GROUP BY cp.root_id ORDER BY total DESC', from, to);
+  return { from, to, sales: s, returns: r, net, net_tax: netTax, net_cost: netCost, profit: round(net - netTax - netCost), byDay, byUser, byProduct, byCategory, byRoot };
 });
-route('GET', '/api/reports/inventory', ADMIN, () => {
-  const rows = all(`SELECT p.id, p.name, p.sku, p.barcode, p.unit, p.stock, p.min_stock, p.cost, p.price, c.name category,
-    ROUND(p.stock*p.cost,2) value, ROUND(p.stock*p.price,2) retail FROM products p LEFT JOIN categories c ON c.id=p.category_id
-    WHERE p.active=1 OR ABS(p.stock) > 0.000001 ORDER BY p.name`);
+route('GET', '/api/reports/inventory', ADMIN, ({ query }) => {
+  const sub = query.category_id ? `AND p.category_id IN (${subtreeSql.replace('SELECT ?', 'SELECT ' + (Number(query.category_id) || 0))})` : '';
+  const rows = all(`SELECT p.id, p.name, p.sku, p.barcode, p.unit, p.stock, p.min_stock, p.cost, p.price, cp.path category, rc.name root,
+    ROUND(p.stock*p.cost,2) value, ROUND(p.stock*p.price,2) retail FROM products p LEFT JOIN cat_paths cp ON cp.id=p.category_id LEFT JOIN categories rc ON rc.id=cp.root_id
+    WHERE (p.active=1 OR ABS(p.stock) > 0.000001) ${sub} ORDER BY cp.path, p.name`);
   return { rows, total_cost: round(rows.reduce((s, r) => s + r.value, 0)), total_retail: round(rows.reduce((s, r) => s + r.retail, 0)) };
 });
 route('GET', '/api/dashboard', ADMIN, () => {
@@ -592,8 +659,8 @@ route('POST', '/api/web/sync', ADMIN, async () => syncNow());
 route('POST', '/api/web/media', ADMIN, ({ body }) => ({ name: saveMedia(body.data) }));
 route('GET', '/api/web/products', ADMIN, () => {
   const reserved = reservedQty();
-  return all(`SELECT p.id, p.name, p.barcode, p.price, p.stock, p.unit, p.category_id, c.name category, p.web_published, p.web_description, p.web_images,
-    p.web_featured, p.web_new, p.web_compare_price, p.web_cat_id, p.web_sub_id, p.web_brand_id FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1 ORDER BY p.name`)
+  return all(`SELECT p.id, p.name, p.barcode, p.price, p.stock, p.unit, p.category_id, c.path category, p.web_published, p.web_description, p.web_images,
+    p.web_featured, p.web_new, p.web_compare_price, p.web_cat_id, p.web_sub_id, p.web_brand_id FROM products p LEFT JOIN cat_paths c ON c.id=p.category_id WHERE p.active=1 ORDER BY p.name`)
     .map((p) => ({ ...p, web_images: JSON.parse(p.web_images || '[]'), reserved: reserved.get(p.id) || 0 }));
 });
 route('PUT', '/api/web/products/:id', ADMIN, ({ body, params }) => {
