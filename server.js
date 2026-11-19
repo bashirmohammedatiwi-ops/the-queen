@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import dgram from 'node:dgram';
-import { MEDIA_DIR, saveMedia, reservedQty, syncNow, pushSoon, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent } from './lib/web-sync.js';
+import { MEDIA_DIR, saveMedia, reservedQty, syncNow, pushSoon, testConnection, scheduleSync, setOrderStatus, webState, onWebEvent, onRemoteChange } from './lib/web-sync.js';
 import {
   db, all, get, run, tx, round, today, localNow, ROOT, DATA_DIR,
   getSettings, saveSettings, hashPassword, checkPassword,
@@ -732,6 +732,97 @@ route('PUT', '/api/web/orders/:id', ADMIN, async ({ body, params, user }) => {
   broadcast('products', { stock: true }); broadcast('web_orders');
   syncNow().catch(() => {}); // إرسال الحالة الجديدة للموقع فوراً
   return o;
+});
+
+// ===== تطبيق تعديلات لوحة التحكم عن بعد =====
+// كل تعديل يمر عبر نفس عمليات النظام (نفس التحقق والقيود المحاسبية) — النظام الإداري يبقى المصدر الأساسي للبيانات
+function invoke(method, url, body = {}) {
+  for (const r of routes) {
+    if (r.method !== method) continue;
+    const m = url.match(r.re); if (!m) continue;
+    const user = get("SELECT * FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1");
+    return r.handler({ body, params: Object.fromEntries(Object.entries(m.groups || {}).map(([k, v]) => [k, decodeURIComponent(v)])), query: {}, user });
+  }
+  throw bad('عملية غير معروفة');
+}
+const isTemp = (v) => typeof v === 'string' && /^t[\w-]+$/.test(v);
+function realId(v, required = false) {
+  if (v == null || v === '') return null;
+  if (isTemp(v)) {
+    const r = get('SELECT real_id FROM web_remote_ids WHERE temp=?', v);
+    if (!r) { if (required) throw bad('عنصر مرتبط لم يُنشأ بعد'); return null; }
+    return r.real_id;
+  }
+  return Number(v) || null;
+}
+const mapTemp = (temp, kind, id) => { if (isTemp(temp)) run('INSERT OR REPLACE INTO web_remote_ids(temp,kind,real_id) VALUES(?,?,?)', temp, kind, id); };
+const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o && k in o).map((k) => [k, o[k]]));
+const STORE_F = ['name', 'barcode', 'price', 'unit', 'category_id', 'min_stock'];
+const WEB_F = ['web_published', 'web_description', 'web_images', 'web_featured', 'web_new', 'web_compare_price', 'web_cat_id', 'web_sub_id', 'web_brand_id'];
+async function saveEntity(d, kind, base) {
+  // إنشاء أو تعديل قسم/براند/بنر (المعرّف المؤقت يُربط بالحقيقي حتى لا يتكرر الإنشاء)
+  const id = realId(d.id);
+  if (id) return { id: (await invoke('PUT', `${base}/${id}`, d.fields)).id };
+  const r = await invoke('POST', base, d.fields);
+  mapTemp(d.id, kind, r.id);
+  return { id: r.id };
+}
+onRemoteChange(async (c) => {
+  const d = c.payload || {};
+  const f = d.fields || {};
+  switch (c.kind) {
+    case 'product.save': {
+      let id = realId(d.id);
+      const store = pick(f, STORE_F);
+      if ('category_id' in store) store.category_id = Number(store.category_id) || null;
+      if (!id) {
+        if (!isTemp(d.id)) throw bad('معرّف غير صالح');
+        const p = await invoke('POST', '/api/products', { ...store, cost: Number(f.cost) || 0, opening_stock: Number(f.opening_stock) || 0 });
+        id = p.id; mapTemp(d.id, 'product', id);
+      } else {
+        const cur = get('SELECT * FROM products WHERE id=?', id);
+        if (!cur) throw bad('الصنف غير موجود');
+        if (Object.keys(store).length) await invoke('PUT', '/api/products/' + id, { ...cur, ...store });
+      }
+      const web = pick(f, WEB_F);
+      for (const k of ['web_cat_id', 'web_sub_id', 'web_brand_id']) if (k in web) web[k] = realId(web[k], true);
+      if (Object.keys(web).length) await invoke('PUT', '/api/web/products/' + id, web);
+      return { id };
+    }
+    case 'product.stock': {
+      const id = realId(d.id, true);
+      const p = get('SELECT stock FROM products WHERE id=?', id); if (!p) throw bad('الصنف غير موجود');
+      if (Number(d.qty) === p.stock) return { id };
+      await invoke('POST', '/api/stock/adjust', { product_id: id, qty: Number(d.qty), mode: 'set', note: 'جرد من لوحة التحكم عن بعد' });
+      return { id };
+    }
+    case 'product.archive': return invoke('DELETE', '/api/products/' + realId(d.id, true));
+    case 'wcat.save': {
+      if ('parent_id' in f) f.parent_id = realId(f.parent_id, true);
+      return saveEntity(d, 'wcat', '/api/web/categories');
+    }
+    case 'wcat.delete': return invoke('DELETE', '/api/web/categories/' + realId(d.id, true));
+    case 'brand.save': return saveEntity(d, 'brand', '/api/web/brands');
+    case 'brand.delete': return invoke('DELETE', '/api/web/brands/' + realId(d.id, true));
+    case 'banner.save': {
+      if (['category', 'brand', 'product'].includes(f.link_type)) f.link_value = String(realId(f.link_value, true));
+      return saveEntity(d, 'banner', '/api/web/banners');
+    }
+    case 'banner.delete': return invoke('DELETE', '/api/web/banners/' + realId(d.id, true));
+    case 'banner.order': return invoke('POST', '/api/web/banners/order', { ids: (d.ids || []).map((x) => realId(x)).filter(Boolean) });
+    case 'content.save': {
+      const allowed = Object.keys(getSettings().web_content);
+      return invoke('PUT', '/api/settings', { web_content: pick(f, allowed) });
+    }
+    case 'order.status': {
+      const o = get('SELECT id, status FROM web_orders WHERE no=?', String(d.no));
+      if (!o) throw bad('الطلب غير موجود في النظام بعد');
+      if (o.status === d.status) return { ok: true };
+      await invoke('PUT', '/api/web/orders/' + o.id, { status: d.status, payment: d.payment, staff_notes: d.notes });
+      return { ok: true };
+    }
+    default: throw bad('نوع تعديل غير معروف');
+  }
 });
 
 // ===== النسخ الاحتياطي =====

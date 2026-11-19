@@ -510,6 +510,7 @@
         const st = await Q.get('/web/status');
         Q.$('#cs').innerHTML = st.configured ? (st.last_error ? '<span class="tag err">خطأ</span>' : st.live ? '<span class="tag ok">متصل مباشرة</span>' : st.last_ok ? '<span class="tag ok">متصل</span>' : '<span class="tag">لم يُختبر</span>') : '<span class="tag warn">غير مربوط</span>';
         Q.$('#sst').innerHTML = `المنتجات المنشورة: <b>${st.published}</b><br>آخر مزامنة ناجحة: <b>${st.last_ok ? Q.dt(st.last_ok) : '—'}</b>${st.last_report ? `<br>آخر تقرير: ${st.last_report.products} منتج، ${st.last_report.orders} طلب جديد، ${st.last_report.images} صورة` : ''}${st.last_error ? `<br><span class="err">${esc(st.last_error)}</span>` : ''}`;
+        try { const u = (await Q.get('/settings')).web?.url; if (u && st.configured) Q.$('#sst').insertAdjacentHTML('beforeend', `<br>لوحة التحكم عن بعد (من الهاتف أو أي جهاز): <a href="${esc(u.replace(/\/+$/, ''))}/admin" target="_blank" rel="noopener"><b dir="ltr">${esc(u.replace(/\/+$/, ''))}/admin</b></a> — بنفس حساب المدير`); } catch { /* */ }
       };
       showState();
       const val = (id) => Q.$('#' + id).value;

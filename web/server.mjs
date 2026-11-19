@@ -258,6 +258,162 @@ R('GET', '/api/orders/track', ({ q, req }) => {
     subtotal: o.subtotal, delivery_fee: o.delivery_fee, total: o.total, history: JSON.parse(o.history).map((h) => ({ ...h, label: STATUS[h.status] })), governorate: o.governorate };
 });
 
+// ===== لوحة التحكم عن بعد =====
+// النظام الإداري يرسل نسخة كاملة (snapshot)، واللوحة ترسل تعديلات تُحفظ في طابور يسحبه النظام ويطبّقه بنفسه
+db.exec(`CREATE TABLE IF NOT EXISTS admin_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, at TEXT);
+CREATE TABLE IF NOT EXISTS changes (id INTEGER PRIMARY KEY, at TEXT NOT NULL, user TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', error TEXT, result TEXT, done_at TEXT);
+CREATE TABLE IF NOT EXISTS admin_sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, username TEXT, created_at TEXT, expires_at TEXT NOT NULL);`);
+const snap = () => { const r = get("SELECT value, at FROM admin_state WHERE key='snap'"); return r ? { ...JSON.parse(r.value), received_at: r.at } : null; };
+const KINDS = ['product.save', 'product.stock', 'product.archive', 'wcat.save', 'wcat.delete', 'brand.save', 'brand.delete', 'banner.save', 'banner.delete', 'banner.order', 'content.save', 'order.status'];
+const sha = (x) => crypto.createHash('sha256').update(String(x)).digest('hex');
+function checkPw(pw, stored) {
+  try { const [salt, h] = String(stored).split(':'); const x = crypto.scryptSync(String(pw), salt, 32); return crypto.timingSafeEqual(Buffer.from(h, 'hex'), x); } catch { return false; }
+}
+const fails = new Map();
+function adminUser(req) {
+  const t = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!t) throw new E(401, 'يرجى تسجيل الدخول');
+  const ses = get('SELECT * FROM admin_sessions WHERE token=? AND expires_at > ?', sha(t), now());
+  if (!ses) throw new E(401, 'انتهت الجلسة، سجّل الدخول من جديد');
+  const u = (snap()?.users || []).find((x) => x.id === ses.user_id && x.username === ses.username);
+  if (!u) { run('DELETE FROM admin_sessions WHERE token=?', sha(t)); throw new E(401, 'الحساب غير مخوّل'); }
+  return { id: u.id, name: u.name, username: u.username, role: u.role };
+}
+// تطبيق التعديلات المعلّقة على النسخة لعرضها فوراً في اللوحة (قبل أن يطبّقها النظام الإداري)
+function overlay(S, c, idmap) {
+  const d = JSON.parse(c.payload), f = d.fields || {};
+  const rid = (v) => (typeof v === 'string' && idmap[v] ? idmap[v] : v);
+  const upsert = (list, id, data) => { id = rid(id); const x = list.find((e) => String(e.id) === String(id)); if (x) Object.assign(x, data, { _pending: true }); else list.push({ id, ...data, _pending: true }); };
+  const drop = (list, id) => { id = rid(id); const i = list.findIndex((e) => String(e.id) === String(id)); if (i >= 0) list.splice(i, 1); };
+  switch (c.kind) {
+    case 'product.save': {
+      const exists = S.products.some((p) => String(p.id) === String(rid(d.id)));
+      const { opening_stock, cost, ...rest } = f;
+      upsert(S.products, d.id, exists ? rest : { stock: Number(opening_stock) || 0, reserved: 0, web_images: [], ...rest });
+      break;
+    }
+    case 'product.stock': upsert(S.products, d.id, { stock: Number(d.qty) }); break;
+    case 'product.archive': drop(S.products, d.id); break;
+    case 'wcat.save': upsert(S.web_categories, d.id, f); break;
+    case 'wcat.delete': drop(S.web_categories, d.id); S.web_categories = S.web_categories.filter((x) => String(rid(x.parent_id)) !== String(rid(d.id))); break;
+    case 'brand.save': upsert(S.brands, d.id, f); break;
+    case 'brand.delete': drop(S.brands, d.id); break;
+    case 'banner.save': upsert(S.banners, d.id, f); break;
+    case 'banner.delete': drop(S.banners, d.id); break;
+    case 'banner.order': (d.ids || []).forEach((id, i) => { const b = S.banners.find((x) => String(x.id) === String(rid(id))); if (b) b.sort = i + 1; }); break;
+    case 'content.save': Object.assign(S.content, f); break;
+  }
+}
+function adminState() {
+  const S = snap();
+  if (!S) return null;
+  const idmap = S.idmap || {};
+  const open = all("SELECT * FROM changes WHERE status IN ('pending','sent') OR (status='applied' AND done_at > ?) ORDER BY id", S.received_at || '');
+  for (const c of open) { try { overlay(S, c, idmap); } catch { /* */ } }
+  delete S.users;
+  return S;
+}
+const RA = (method, pattern, fn) => R(method, '/api/admin' + pattern, fn, 'admin');
+RA('POST', '/login', ({ body, req }) => {
+  const ip = clientIp(req), k = ip + '|' + String(body.username || '').toLowerCase();
+  const f = fails.get(k) || { n: 0, until: 0 };
+  if (f.until > Date.now()) throw new E(429, `محاولات كثيرة، حاول بعد ${Math.ceil((f.until - Date.now()) / 1000)} ثانية`);
+  limit('alogin:' + ip, 30, 10 * 60e3);
+  const S = snap();
+  if (!S) throw new E(503, 'لم يتم ربط النظام الإداري بالموقع بعد — شغّل النظام الإداري على جهاز المتجر');
+  const u = (S.users || []).find((x) => x.username && x.username.toLowerCase() === String(body.username || '').trim().toLowerCase());
+  if (!u || !checkPw(body.password || '', u.password)) {
+    f.n++; if (f.n >= 5) f.until = Date.now() + Math.min(15 * 60e3, 2 ** (f.n - 5) * 30e3); fails.set(k, f);
+    throw new E(401, 'اسم المستخدم أو كلمة المرور غير صحيحة');
+  }
+  fails.delete(k);
+  const token = crypto.randomBytes(32).toString('base64url');
+  run('DELETE FROM admin_sessions WHERE expires_at < ?', now());
+  run('INSERT INTO admin_sessions(token,user_id,username,created_at,expires_at) VALUES(?,?,?,?,?)', sha(token), u.id, u.username, now(), new Date(Date.now() + 30 * 86400e3).toISOString());
+  return { token, user: { id: u.id, name: u.name, username: u.username, role: u.role } };
+});
+RA('POST', '/logout', ({ req }) => { run('DELETE FROM admin_sessions WHERE token=?', sha(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''))); return { ok: true }; });
+RA('GET', '/me', ({ user }) => ({ user }));
+RA('GET', '/state', () => {
+  const S = adminState();
+  if (!S) throw new E(503, 'لم تصل بيانات النظام الإداري بعد');
+  return { ...S, live: syncLive.size > 0, governorates: GOVERNORATES };
+});
+RA('GET', '/summary', () => {
+  const S = snap();
+  const day = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+  const today = all("SELECT total, status FROM orders WHERE substr(datetime(created_at, '+3 hours'),1,10)=?", day);
+  return {
+    live: syncLive.size > 0, synced_at: S?.synced_at || null,
+    counts: Object.fromEntries(all('SELECT status, COUNT(*) n FROM orders GROUP BY status').map((r) => [r.status, r.n])),
+    today: { n: today.length, total: today.filter((o) => o.status !== 'cancelled').reduce((a, o) => a + o.total, 0) },
+    week: all("SELECT substr(datetime(created_at, '+3 hours'),1,10) d, COUNT(*) n, SUM(CASE WHEN status<>'cancelled' THEN total ELSE 0 END) t FROM orders WHERE created_at > ? GROUP BY d ORDER BY d", new Date(Date.now() - 7 * 86400e3).toISOString()),
+    pending: get("SELECT COUNT(*) n FROM changes WHERE status IN ('pending','sent')").n,
+    failed: all("SELECT id, kind, error, done_at FROM changes WHERE status='failed' ORDER BY id DESC LIMIT 5"),
+    top: all("SELECT j.value ->> '$.name' name, SUM(j.value ->> '$.qty') q FROM orders o, json_each(o.items) j WHERE o.status<>'cancelled' AND o.created_at > ? GROUP BY j.value ->> '$.id' ORDER BY q DESC LIMIT 5", new Date(Date.now() - 30 * 86400e3).toISOString()),
+  };
+});
+RA('GET', '/orders', ({ q }) => {
+  const w = [], p = [];
+  if (q.status === 'open') w.push("status IN ('new','confirmed','shipping')");
+  else if (q.status) { w.push('status=?'); p.push(q.status); }
+  if (q.q) { const t = `%${q.q}%`; w.push('(no LIKE ? OR name LIKE ? OR phone LIKE ?)'); p.push(t, t, t); }
+  return { orders: all(`SELECT * FROM orders ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY id DESC LIMIT 300`, ...p)
+    .map(({ ip, token, ...o }) => ({ ...o, items: JSON.parse(o.items), history: JSON.parse(o.history) })) };
+});
+function setWebOrderStatus(o, status) {
+  if (o.status === status) return false;
+  const h = JSON.parse(o.history), flow = ['new', 'confirmed', 'shipping', 'delivered'];
+  const from = flow.indexOf(o.status), to = flow.indexOf(status);
+  if (from >= 0 && to > from + 1) for (const st of flow.slice(from + 1, to)) h.push({ status: st, at: now() });
+  h.push({ status, at: now() });
+  run('UPDATE orders SET status=?, history=?, updated_at=? WHERE no=?', status, JSON.stringify(h), now(), o.no);
+  emit(live, 'order', { t: o.token, status });
+  if (status === 'cancelled') emit(live, 'catalog', { ids: JSON.parse(o.items).map((i) => i.id) });
+  return true;
+}
+RA('PUT', '/orders/:no', ({ params, body, user }) => {
+  const o = get('SELECT * FROM orders WHERE no=?', params.no);
+  if (!o) throw new E(404, 'الطلب غير موجود');
+  if (!STATUS[body.status]) throw new E(400, 'حالة غير صحيحة');
+  if (o.status === 'delivered' && body.status !== 'delivered') throw new E(400, 'الطلب مُسلّم وتم إصدار فاتورته');
+  if (o.status === 'cancelled' && body.status !== 'cancelled') throw new E(400, 'لا يمكن إعادة فتح طلب ملغي');
+  setWebOrderStatus(o, body.status);
+  run('INSERT INTO changes(at,user,kind,payload) VALUES(?,?,?,?)', now(), user.name, 'order.status',
+    JSON.stringify({ no: o.no, status: body.status, payment: ['cash', 'card', 'credit'].includes(body.payment) ? body.payment : 'cash', notes: body.notes ? String(body.notes).slice(0, 300) : undefined }));
+  emit(syncLive, 'change', {});
+  return { ok: true };
+});
+RA('POST', '/media', ({ body }) => {
+  const m = String(body.data || '').match(/^data:image\/(jpeg|png|webp);base64,(.+)$/);
+  if (!m) throw new E(400, 'صورة غير صالحة');
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 3e6) throw new E(413, 'حجم الصورة كبير');
+  const name = crypto.createHash('sha1').update(buf).digest('hex') + '.' + (m[1] === 'jpeg' ? 'jpg' : m[1]);
+  fs.writeFileSync(path.join(MEDIA, name), buf);
+  return { name };
+});
+RA('POST', '/change', ({ body, user }) => {
+  if (!KINDS.includes(body.kind) || body.kind === 'order.status') throw new E(400, 'نوع تعديل غير معروف');
+  const payload = body.payload && typeof body.payload === 'object' ? body.payload : {};
+  const js = JSON.stringify(payload);
+  if (js.length > 60000) throw new E(413, 'البيانات كبيرة');
+  const f = payload.fields || {};
+  if (body.kind === 'product.save') {
+    if ('name' in f && String(f.name).trim().length < 2) throw new E(400, 'اسم المنتج مطلوب');
+    if ('price' in f && !(Number(f.price) >= 0)) throw new E(400, 'السعر غير صحيح');
+    if (typeof payload.id === 'string' && !('name' in f && 'price' in f)) throw new E(400, 'اسم المنتج وسعره مطلوبان');
+  }
+  if ((body.kind === 'wcat.save' || body.kind === 'brand.save') && 'name' in f && !String(f.name).trim()) throw new E(400, 'الاسم مطلوب');
+  if (body.kind === 'banner.save' && !f.image) throw new E(400, 'اختر صورة البنر');
+  if (payload.id != null && !(typeof payload.id === 'number' || /^t[\w-]{4,40}$/.test(payload.id))) throw new E(400, 'معرّف غير صالح');
+  const id = run('INSERT INTO changes(at,user,kind,payload) VALUES(?,?,?,?)', now(), user.name, body.kind, js).lastInsertRowid;
+  emit(syncLive, 'change', {});
+  return { id, live: syncLive.size > 0 };
+});
+RA('GET', '/changes', () => ({ changes: all('SELECT id, at, user, kind, payload, status, error, done_at FROM changes ORDER BY id DESC LIMIT 100').map((c) => ({ ...c, payload: JSON.parse(c.payload) })) }));
+
 // ===== المزامنة مع النظام الإداري (مفتاح سري) =====
 R('GET', '/api/sync/ping', () => ({ ok: true, app: 'the-queen-web', products: get('SELECT COUNT(*) n FROM products').n, orders_new: get("SELECT COUNT(*) n FROM orders WHERE status='new'").n }), true);
 R('PUT', '/api/sync/settings', ({ body }) => {
@@ -302,6 +458,19 @@ R('PUT', '/api/sync/catalog', ({ body }) => {
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   if (changed) emit(live, 'catalog', {});
   return { ok: true, products: prods.length, categories: cats.length };
+}, true);
+R('PUT', '/api/sync/admin', ({ body }) => {
+  run("INSERT INTO admin_state(key,value,at) VALUES('snap',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, at=excluded.at", JSON.stringify(body || {}), now());
+  return { ok: true };
+}, true);
+R('GET', '/api/sync/changes', () => {
+  const rows = all("SELECT * FROM changes WHERE status IN ('pending','sent') ORDER BY id LIMIT 200");
+  for (const r of rows) run("UPDATE changes SET status='sent' WHERE id=?", r.id);
+  return { changes: rows.map((c) => ({ id: c.id, kind: c.kind, user: c.user, at: c.at, payload: JSON.parse(c.payload) })) };
+}, true);
+R('POST', '/api/sync/changes/ack', ({ body }) => {
+  for (const r of body.results || []) run('UPDATE changes SET status=?, error=?, result=?, done_at=? WHERE id=?', r.ok ? 'applied' : 'failed', r.ok ? null : String(r.error || '').slice(0, 300), r.result ? JSON.stringify(r.result) : null, now(), Number(r.id));
+  return { ok: true };
 }, true);
 R('GET', '/api/sync/media', () => ({ files: fs.readdirSync(MEDIA).filter((f) => /^[a-f0-9]{40}\./.test(f)) }), true);
 R('POST', '/api/sync/media', ({ body }) => {
@@ -384,11 +553,13 @@ const server = http.createServer(async (req, res) => {
       for (const r of routes) {
         if (r.method !== req.method) continue;
         const m = p.match(r.re); if (!m) continue;
-        if (r.auth && !keyOk(req)) { limit('auth:' + clientIp(req), 20, 10 * 60e3); throw new E(401, 'مفتاح المزامنة غير صحيح'); }
+        if (r.auth === true && !keyOk(req)) { limit('auth:' + clientIp(req), 20, 10 * 60e3); throw new E(401, 'مفتاح المزامنة غير صحيح'); }
+        const user = r.auth === 'admin' && !p.endsWith('/login') ? adminUser(req) : null;
         const body = ['POST', 'PUT'].includes(req.method) ? await readBody(req, r.auth ? 6e6 : 2e5) : {};
         if (!r.auth) limit('api:' + clientIp(req), 600, 60e3);
+        else if (r.auth === 'admin') limit('admin:' + clientIp(req), 1200, 60e3);
         const params = Object.fromEntries(Object.entries(m.groups || {}).map(([k, v]) => [k, decodeURIComponent(v)]));
-        return send(res, 200, await r.fn({ req, body, q: Object.fromEntries(url.searchParams), params }));
+        return send(res, 200, await r.fn({ req, body, q: Object.fromEntries(url.searchParams), params, user }));
       }
       throw new E(404, 'غير موجود');
     }
@@ -398,7 +569,12 @@ const server = http.createServer(async (req, res) => {
       return serveFile(res, path.join(MEDIA, f), 'public, max-age=31536000, immutable');
     }
     if (p === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
-    if (p === '/robots.txt') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('User-agent: *\nAllow: /\n'); }
+    if (p === '/robots.txt') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('User-agent: *\nAllow: /\nDisallow: /admin\n'); }
+    if (p === '/admin' || p.startsWith('/admin/')) {
+      const f = path.join(PUBLIC, 'admin.html');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Robots-Tag': 'noindex, nofollow', 'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+      return res.end(fs.readFileSync(f));
+    }
     const file = path.normalize(path.join(PUBLIC, decodeURIComponent(p)));
     if (file.startsWith(PUBLIC + path.sep) && path.extname(file) && fs.existsSync(file) && !file.endsWith('index.html'))
       return serveFile(res, file, /\.(woff2|png|jpg|svg|webp)$/.test(file) ? 'public, max-age=604800' : 'no-cache');

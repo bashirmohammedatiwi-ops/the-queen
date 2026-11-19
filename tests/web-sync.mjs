@@ -129,10 +129,53 @@ async function main() {
   const invr = (await A('GET', '/reports/inventory')).d;
   ok(near(tb.find((r) => r.code === '1301').closing, invr.rows.reduce((s, r) => s + r.stock * r.cost, 0), 1), 'المخزون = حساب المخزون');
   // صفحات الموقع
-  for (const p of ['/', '/shop', '/cart', '/checkout', '/track', '/orders', '/wishlist', '/categories', '/brand/x', '/about', '/sw.js', '/fonts/fonts.css', '/icon.png', '/robots.txt', '/healthz'])
+  for (const p of ['/admin.js', '/admin.css', '/', '/shop', '/cart', '/checkout', '/track', '/orders', '/wishlist', '/categories', '/brand/x', '/about', '/sw.js', '/fonts/fonts.css', '/icon.png', '/robots.txt', '/healthz'])
     ok((await fetch(`http://127.0.0.1:${WP}${p}`)).status === 200, 'صفحة الموقع ' + p);
   ok((await fetch(`http://127.0.0.1:${WP}/p/not-found-1`)).status === 404, 'منتج غير موجود 404');
   ok((await fetch(`http://127.0.0.1:${WP}/%E0%A4%A`)).status === 400 && (await fetch(`http://127.0.0.1:${WP}/healthz`)).status === 200, 'رابط تالف لا يوقف الموقع');
+  // ===== لوحة التحكم عن بعد =====
+  const AW = (tk) => (m, p, b) => req(W, null, m, '/admin' + p, b, tk ? { Authorization: 'Bearer ' + tk } : {});
+  ok((await AW()('POST', '/login', { username: 'admin', password: 'wrong' })).status === 401, 'لوحة التحكم ترفض كلمة مرور خاطئة');
+  ok((await AW()('GET', '/state')).status === 401, 'لوحة التحكم تتطلب تسجيل الدخول');
+  ok((await AW()('POST', '/login', { username: 'cashier1', password: 'x' })).status === 401, 'الكاشير لا يدخل لوحة التحكم');
+  const lg = await AW()('POST', '/login', { username: 'Admin', password: 'admin123' });
+  ok(lg.status === 200 && lg.d.token, 'دخول لوحة التحكم بحساب النظام الإداري');
+  const RW = AW(lg.d.token);
+  const st0 = (await RW('GET', '/state')).d;
+  ok(st0.products.length === 3 && !('users' in st0) && st0.web_categories.length >= 3 && st0.content.whatsapp === '07701234567', 'اللوحة ترى كل الأصناف (حتى غير المنشورة) بدون كلمات المرور');
+  const tb1 = 'tbrand' + Date.now(), tp1 = 'tprod' + Date.now();
+  ok((await RW('POST', '/change', { kind: 'brand.save', payload: { id: tb1, fields: { name: 'Chanel' } } })).status === 200, 'إنشاء براند عن بعد');
+  ok((await RW('POST', '/change', { kind: 'product.save', payload: { id: tp1, fields: { name: 'أحمر شفاه', price: 15000, opening_stock: 4, cost: 7000, web_published: true, web_sub_id: ws.id, web_brand_id: tb1, web_description: 'ثابت طويل', web_images: [img] } } })).status === 200, 'إنشاء منتج عن بعد');
+  await RW('POST', '/change', { kind: 'product.save', payload: { id: p2.id, fields: { price: 13000, web_published: true } } });
+  await RW('POST', '/change', { kind: 'content.save', payload: { fields: { whatsapp: '07709998877', free_over: 100000 } } });
+  await RW('POST', '/change', { kind: 'product.save', payload: { id: 999999, fields: { price: 1 } } });
+  ok((await RW('POST', '/change', { kind: 'product.save', payload: { id: 'tnew12345', fields: { price: 5 } } })).status === 400, 'منتج جديد يتطلب الاسم والسعر');
+  const st1 = (await RW('GET', '/state')).d;
+  ok(st1.products.find((x) => x.id === tp1)?._pending && st1.products.find((x) => x.id === p2.id).price === 13000 && st1.content.whatsapp === '07709998877', 'التعديلات تظهر فوراً في اللوحة قبل تطبيقها');
+  const ro = await req(W, null, 'POST', '/orders', { name: 'هدى', phone: '07501234567', governorate: 'بغداد', address: 'زيونة شارع الربيعي', items: [{ id: p1.id, qty: 1 }] });
+  const r0 = await A('POST', '/web/sync');
+  ok((await RW('PUT', '/orders/' + ro.d.no, { status: 'delivered', payment: 'cash' })).status === 200, 'تسليم طلب من اللوحة');
+  ok((await req(W, null, 'GET', '/orders/by-phone?phone=07501234567')).d.orders[0].status === 'delivered', 'الزبون يرى الحالة فوراً');
+  const rs = await A('POST', '/web/sync');
+  ok(r0.d.remote === 4 && rs.status === 200 && rs.d.remote === 1, 'النظام يطبّق تعديلات اللوحة', JSON.stringify([r0.d, rs.d]));
+  const ep = (await A('GET', '/products')).d.find((x) => x.name === 'أحمر شفاه');
+  const ewp = (await A('GET', '/web/products')).d.find((x) => x.id === ep?.id);
+  ok(ep && ep.stock === 4 && ep.price === 15000 && ewp.web_sub_id === ws.id && ewp.web_cat_id === wc.id && ewp.web_brand_id && ewp.web_images[0] === img, 'المنتج الجديد في النظام بكل تفاصيله', JSON.stringify(ewp));
+  ok((await A('GET', '/web/taxonomy')).d.brands.some((b) => b.name === 'Chanel' && b.id === ewp.web_brand_id), 'البراند الجديد مرتبط بالمنتج');
+  ok((await A('GET', '/products/' + p2.id)).d.price === 13000, 'تعديل السعر عن بعد');
+  ok((await A('GET', '/settings')).d.web_content.whatsapp === '07709998877', 'تعديل محتوى الموقع عن بعد');
+  const ero = (await A('GET', '/web/orders')).d.find((x) => x.no === ro.d.no);
+  ok(ero && ero.status === 'delivered' && ero.invoice_id, 'تسليم الطلب عن بعد يصدر فاتورة في النظام');
+  const chs = (await RW('GET', '/changes')).d.changes;
+  ok(chs.filter((c) => c.status === 'applied').length === 5 && chs.find((c) => c.status === 'failed')?.error, 'سجل التعديلات يوضح الناجح والفاشل');
+  ok((await req(W, null, 'GET', '/products?q=' + encodeURIComponent('أحمر شفاه'))).d.total === 1 && (await req(W, null, 'GET', '/store')).d.store.whatsapp === '07709998877', 'التعديلات ظاهرة في الموقع');
+  await RW('POST', '/change', { kind: 'product.save', payload: { id: tp1, fields: { name: 'أحمر شفاه مات', price: 16000 } } });
+  await RW('POST', '/change', { kind: 'product.stock', payload: { id: tp1, qty: 7 } });
+  await A('POST', '/web/sync');
+  const ep2 = (await A('GET', '/products/' + ep.id)).d;
+  ok(ep2.name === 'أحمر شفاه مات' && ep2.price === 16000 && ep2.stock === 7 && (await A('GET', '/products')).d.filter((x) => x.name.startsWith('أحمر شفاه')).length === 1, 'تعديل منتج أُنشئ عن بعد وجرده بدون تكرار');
+  ok((await fetch(`http://127.0.0.1:${WP}/admin`)).status === 200, 'صفحة لوحة التحكم');
+  ok((await RW('POST', '/logout')).status === 200 && (await RW('GET', '/state')).status === 401, 'تسجيل الخروج');
   // ===== التحديث المباشر =====
   const sse = async (url, headers = {}) => {
     const ctl = new AbortController(); const r = await fetch(url, { headers, signal: ctl.signal });
