@@ -276,7 +276,7 @@
     try {
       const inv = await Q.post('/invoices', { source: 'pos', customer_id: S.customer?.id || null, discount: S.discount, items: S.cart.map((l) => ({ product_id: l.id, qty: l.qty, price: l.price, discount: l.discount })), paid_cash: t.total, tendered: t.total });
       reset();
-      if (Q.settings.pos.auto_print) Q.print.run(Q.print.thermal(inv), { copies: Q.settings.print_thermal.copies || 1 });
+      if (Q.settings.pos.auto_print) Q.print.run(Q.print.thermal(inv), { copies: Q.settings.print_thermal.copies || 1, drawer: inv.paid_cash > 0 });
       msg(`<b class="ok">تمت الفاتورة ${esc(inv.number)}</b> <span class="sp"></span><b class="num">${fmt(inv.total)}</b> <span class="muted">نقداً</span>`, 'ok');
       refreshShift();
     } catch (e) { Q.err(e); } finally { quickBusy = false; focusSearch(); }
@@ -451,7 +451,7 @@
       try {
         const inv = await Q.post('/invoices', req);
         m.close(); reset();
-        if (Q.settings.pos.auto_print) Q.print.run(Q.print.thermal(inv), { copies: Q.settings.print_thermal.copies || 1 });
+        if (Q.settings.pos.auto_print) Q.print.run(Q.print.thermal(inv), { copies: Q.settings.print_thermal.copies || 1, drawer: inv.paid_cash > 0 });
         doneDlg(inv);
         refreshShift();
       } catch (e) { Q.err(e); busy = false; m.$('[data-ok]').disabled = false; }

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('desktop', {
   isDesktop: true,
   print: (html, opts) => ipcRenderer.invoke('print', html, opts || {}),
   printers: () => ipcRenderer.invoke('printers'),
+  printLog: () => ipcRenderer.invoke('print:log'),
   previewPrint: (html, opts) => ipcRenderer.invoke('print:preview', html, opts || {}),
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch || {}),

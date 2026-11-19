@@ -20,9 +20,11 @@ if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
 // ===== إعدادات الجهاز (ملف محلي) =====
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
-const DEFAULTS = { port: 3000, server: '', printer: '', silent: true, openAtLogin: true, closeToTray: true, printMode: 'image', pageSizeMode: 'auto' };
+const DEFAULTS = { port: 3000, server: '', printer: '', silent: true, openAtLogin: true, closeToTray: true, printMode: 'escpos', pageSizeMode: 'auto', autoCut: true, cashDrawer: false };
 let config = { ...DEFAULTS };
 try { config = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; } catch { /* أول تشغيل */ }
+// من الإصدار 1.0.3: الطباعة المباشرة ESC/POS هي الافتراضية للطابعات الحرارية
+if (!config.escposDefault) { config.printMode = 'escpos'; config.escposDefault = true; }
 const saveConfig = () => { fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true }); fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); };
 
 const resPath = (...p) => (app.isPackaged ? path.join(process.resourcesPath, ...p) : path.join(__dirname, ...p));
@@ -179,6 +181,9 @@ ipcMain.handle('printers', async (e) => (await e.sender.getPrintersAsync()).map(
 // الإيصال الحراري يُطبع افتراضياً كصورة بدقة الطابعة (203 نقطة/إنش): يمنع اختفاء النص العربي في تعريفات
 // الطابعات الحرارية التي تستبدل خطوط ويندوز بخطوطها الداخلية (السبب الشائع للورقة البيضاء)
 const { renderReceiptImage, wait } = require('./print-image.cjs');
+const { buildEscPos, sendRaw } = require('./escpos.cjs');
+// سجل الطباعة لتشخيص أي مشكلة (آخر 200 سطر)
+const printLog = (line) => { try { const f = path.join(app.getPath('userData'), 'print-log.txt'); const old = fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').slice(-200) : []; fs.writeFileSync(f, [...old, `${new Date().toISOString()} ${line}`].join('\n')); } catch { /* */ } };
 ipcMain.handle('print', async (_e, html, opts = {}) => {
   const tmp = path.join(os.tmpdir(), `queen-print-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
   const tmp2 = tmp.replace('.html', '-img.html');
@@ -189,10 +194,21 @@ ipcMain.handle('print', async (_e, html, opts = {}) => {
     const printOpts = { silent, printBackground: true, copies: Math.max(1, Number(opts.copies) || 1), margins: { marginType: 'none' } };
     const deviceName = opts.printer ?? config.printer;
     if (deviceName) printOpts.deviceName = deviceName;
-    const mode = opts.mode || config.printMode || 'image';
+    const mode = opts.mode || config.printMode || 'escpos';
     const sizeMode = opts.sizeMode || config.pageSizeMode || 'auto';
     const paperMm = Number(opts.width) || 80;
     let file = tmp, hMm = 0;
+    // الطريقة المباشرة: أوامر ESC/POS للطابعة الحرارية بدون أي تعريف أو محرك طباعة
+    if (opts.thermal && mode === 'escpos' && deviceName) {
+      const dots = paperMm >= 76 ? 576 : paperMm >= 56 ? 384 : Math.round(((paperMm - 4) / 25.4) * 203);
+      const contentMm = paperMm >= 76 ? 72 : paperMm >= 56 ? 48 : paperMm - 4;
+      const r = await renderReceiptImage(tmp, paperMm, dots / ((contentMm / 25.4) * 96));
+      const sz = r.img.getSize();
+      const data = buildEscPos({ bitmap: r.img.toBitmap(), width: sz.width, height: sz.height }, { dots, cut: config.autoCut !== false, drawer: !!opts.drawer && !!config.cashDrawer, copies: printOpts.copies });
+      const res = await sendRaw(deviceName, data);
+      printLog(`escpos printer="${deviceName}" ${sz.width}x${sz.height} bytes=${data.length} -> ${res.ok ? 'OK' : res.reason}`);
+      return res.ok ? res : { ok: false, reason: res.reason + ' — جرّب طريقة «صورة» من إعدادات الطابعة' };
+    }
     if (opts.thermal && mode === 'image') {
       const r = await renderReceiptImage(tmp, paperMm);
       hMm = r.hMm;
@@ -209,8 +225,11 @@ ipcMain.handle('print', async (_e, html, opts = {}) => {
       if (!hMm) hMm = ((await pw.webContents.executeJavaScript('Math.ceil(document.documentElement.scrollHeight)')) * 25.4) / 96;
       printOpts.pageSize = { width: paperMm * 1000, height: Math.max(50000, Math.ceil(hMm + 6) * 1000) };
     }
-    return await new Promise((resolve) => pw.webContents.print(printOpts, (ok, reason) => resolve({ ok, reason: ok ? '' : reason || 'فشل الطباعة' })));
+    const res = await new Promise((resolve) => pw.webContents.print(printOpts, (ok, reason) => resolve({ ok, reason: ok ? '' : reason || 'فشل الطباعة' })));
+    printLog(`${opts.thermal ? mode : 'a4'} printer="${deviceName || ''}" size=${sizeMode} -> ${res.ok ? 'OK' : res.reason}`);
+    return res;
   } catch (e) {
+    printLog('ERROR ' + e.message);
     return { ok: false, reason: e.message };
   } finally {
     pw?.destroy(); fs.rm(tmp, () => {}); fs.rm(tmp2, () => {});
@@ -223,9 +242,10 @@ ipcMain.handle('print:preview', async (_e, html, opts = {}) => {
   try { const r = await renderReceiptImage(tmp, Number(opts.width) || 80); return 'data:image/png;base64,' + r.png.toString('base64'); }
   catch (e) { return { error: e.message }; } finally { fs.rm(tmp, () => {}); }
 });
+ipcMain.handle('print:log', () => { try { return fs.readFileSync(path.join(app.getPath('userData'), 'print-log.txt'), 'utf8').split('\n').slice(-30).join('\n'); } catch { return ''; } });
 ipcMain.handle('config:get', () => ({ ...config, mode: MODE, version: app.getVersion(), server: baseUrl || config.server }));
 ipcMain.handle('config:set', (_e, patch) => {
-  for (const k of ['printer', 'silent', 'server', 'openAtLogin', 'closeToTray', 'printMode', 'pageSizeMode']) if (k in patch) config[k] = patch[k];
+  for (const k of ['printer', 'silent', 'server', 'openAtLogin', 'closeToTray', 'printMode', 'pageSizeMode', 'autoCut', 'cashDrawer']) if (k in patch) config[k] = patch[k];
   saveConfig(); applyLogin(); return { ...config };
 });
 ipcMain.handle('discover', async () => dedupe(await discover(1800)));

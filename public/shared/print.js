@@ -77,7 +77,7 @@
     const thermal = opts.thermal ?? /@page\{size:\d+mm auto/.test(html);
     if (thermal && window.desktop?.print) {
       const cfg = await window.desktop.getConfig();
-      const r = await window.desktop.print(html, { thermal: true, copies: opts.copies || 1, width: Q.settings?.print_thermal?.width || 80, silent: cfg.silent && !!cfg.printer, mode: cfg.printMode, sizeMode: cfg.pageSizeMode });
+      const r = await window.desktop.print(html, { thermal: true, copies: opts.copies || 1, width: Q.settings?.print_thermal?.width || 80, silent: cfg.silent && !!cfg.printer, mode: cfg.printMode, sizeMode: cfg.pageSizeMode, drawer: !!opts.drawer });
       if (!r.ok && r.reason && !/cancel/i.test(r.reason)) Q.toast('تعذرت الطباعة: ' + r.reason + ' — تحقق من الطابعة من زر "الطابعة"', 'err');
       return;
     }
@@ -98,21 +98,32 @@
         <label class="f"><span>طابعة الإيصالات الحرارية</span><select class="input" id="dp"><option value="">— اختيار عند كل طباعة —</option>
           ${printers.map((p) => `<option value="${esc(p.name)}" ${p.name === cfg.printer ? 'selected' : ''}>${esc(p.displayName)}${p.isDefault ? ' (الافتراضية)' : ''}</option>`).join('')}</select></label>
         <label class="chk" style="margin-top:10px"><input type="checkbox" id="ds" ${cfg.silent ? 'checked' : ''}> طباعة مباشرة بدون نافذة الطباعة</label>
-        <label class="f" style="margin-top:12px"><span>طريقة الطباعة</span><select class="input" id="dm">${opt('image', cfg.printMode || 'image', 'صورة — موصى بها (تمنع اختفاء النص العربي)')}${opt('text', cfg.printMode, 'نص — أسرع لكنها قد لا تعمل مع بعض الطابعات')}</select></label>
-        <label class="f" style="margin-top:10px"><span>طول الورقة</span><select class="input" id="dz">${opt('auto', cfg.pageSizeMode || 'auto', 'تلقائي حسب طول الإيصال (موصى به)')}${opt('driver', cfg.pageSizeMode, 'حسب إعداد ورق الطابعة في ويندوز')}</select></label>
-        <div class="faint" style="font-size:12px;margin-top:10px;line-height:1.7">إذا خرجت ورقة بيضاء: جرّب «صورة» ثم «طول الورقة: حسب إعداد الطابعة».<br>عرض الورق (80/58 مم) وتصميم الإيصال من: النظام الإداري ← إعدادات الطباعة.</div>
+        <label class="f" style="margin-top:12px"><span>طريقة الطباعة</span><select class="input" id="dm">${opt('escpos', cfg.printMode || 'escpos', 'مباشرة ESC/POS — موصى بها للطابعات الحرارية')}${opt('image', cfg.printMode, 'صورة عبر تعريف ويندوز')}${opt('text', cfg.printMode, 'نص عبر تعريف ويندوز')}</select></label>
+        <div id="dzw"><label class="f" style="margin-top:10px"><span>طول الورقة</span><select class="input" id="dz">${opt('auto', cfg.pageSizeMode || 'auto', 'تلقائي حسب طول الإيصال')}${opt('driver', cfg.pageSizeMode, 'حسب إعداد ورق الطابعة في ويندوز')}</select></label></div>
+        <div id="dew"><label class="chk" style="margin-top:10px"><input type="checkbox" id="dcut" ${cfg.autoCut !== false ? 'checked' : ''}> قص الورق تلقائياً بعد الإيصال</label>
+        <label class="chk" style="margin-top:6px"><input type="checkbox" id="ddr" ${cfg.cashDrawer ? 'checked' : ''}> فتح درج النقود عند البيع النقدي (الدرج موصول بالطابعة)</label></div>
+        <div class="faint" style="font-size:12px;margin-top:10px;line-height:1.7">الطريقة المباشرة ترسل الإيصال للطابعة بلغتها (تعمل مع أغلب طابعات 80 و58 مم: Xprinter وEpson وRongta وغيرها).<br>عرض الورق وتصميم الإيصال من: النظام الإداري ← إعدادات الطباعة.</div>
+        <details style="margin-top:8px"><summary class="faint" style="cursor:pointer;font-size:12px">سجل الطباعة (للتشخيص)</summary><pre id="dlog" class="mono" style="font-size:10.5px;max-height:140px;overflow:auto;background:#f6f6f6;padding:6px;border-radius:4px;white-space:pre-wrap;direction:ltr;text-align:left"></pre></details>
         ${cfg.mode === 'pos' ? `<div class="divider"></div><div class="muted">متصل بالخادم: <span class="mono" dir="ltr">${esc(cfg.server || '')}</span></div><button class="btn sm" id="dc" style="margin-top:6px">تغيير الخادم</button>` : ''}
         <div class="faint" style="font-size:11.5px;margin-top:12px">الإصدار ${esc(cfg.version)}</div></div>
         <div><div class="muted" style="font-size:12px;margin-bottom:4px">معاينة ما سيُطبع</div><div id="pv" style="border:1px solid var(--line);border-radius:6px;height:380px;overflow:auto;background:#f4f4f4;display:grid;place-items:start center;padding:6px"><span class="faint" style="align-self:center">…</span></div></div></div>`,
       foot: '<button class="btn primary" data-ok>حفظ</button><button class="btn" data-t>طباعة تجريبية</button>',
     });
-    const save = () => window.desktop.setConfig({ printer: m.$('#dp').value, silent: m.$('#ds').checked, printMode: m.$('#dm').value, pageSizeMode: m.$('#dz').value });
+    const save = () => window.desktop.setConfig({ printer: m.$('#dp').value, silent: m.$('#ds').checked, printMode: m.$('#dm').value, pageSizeMode: m.$('#dz').value, autoCut: m.$('#dcut').checked, cashDrawer: m.$('#ddr').checked });
+    const sync = () => { const esc = m.$('#dm').value === 'escpos'; m.$('#dzw').hidden = esc; m.$('#dew').hidden = !esc; };
+    m.$('#dm').onchange = sync; sync();
+    const loadLog = async () => { if (window.desktop.printLog) m.$('#dlog').textContent = (await window.desktop.printLog()) || 'لا توجد عمليات طباعة بعد'; };
+    loadLog();
     const width = Q.settings?.print_thermal?.width || 80;
     if (window.desktop.previewPrint) window.desktop.previewPrint(P.testReceipt(), { width }).then((src) => {
       m.$('#pv').innerHTML = typeof src === 'string' ? `<img src="${src}" style="width:100%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15)">` : `<span class="err">${esc(src?.error || 'تعذرت المعاينة')}</span>`;
     });
     m.$('[data-ok]').onclick = async () => { await save(); m.close(); Q.toast('تم حفظ إعدادات الجهاز', 'ok'); };
-    m.$('[data-t]').onclick = async () => { await save(); P.run(P.testReceipt()); Q.toast('تم إرسال طباعة تجريبية'); };
+    m.$('[data-t]').onclick = async () => {
+      await save();
+      if (m.$('#dm').value === 'escpos' && !m.$('#dp').value) return Q.toast('اختر الطابعة الحرارية أولاً', 'err');
+      await P.run(P.testReceipt()); Q.toast('تم إرسال طباعة تجريبية'); setTimeout(loadLog, 400);
+    };
     m.$('#dc') && (m.$('#dc').onclick = () => { m.close(); window.desktop.showConnect(); });
   };
 
