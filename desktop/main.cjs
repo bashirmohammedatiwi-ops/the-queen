@@ -20,7 +20,7 @@ if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
 
 // ===== إعدادات الجهاز (ملف محلي) =====
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
-const DEFAULTS = { port: 3000, server: '', printer: '', silent: true, openAtLogin: true, closeToTray: true };
+const DEFAULTS = { port: 3000, server: '', printer: '', silent: true, openAtLogin: true, closeToTray: true, printMode: 'image', pageSizeMode: 'auto' };
 let config = { ...DEFAULTS };
 try { config = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; } catch { /* أول تشغيل */ }
 const saveConfig = () => { fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true }); fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2)); };
@@ -175,32 +175,57 @@ function go(url) {
 
 // ===== الطباعة المباشرة (بدون نافذة) =====
 ipcMain.handle('printers', async (e) => (await e.sender.getPrintersAsync()).map((p) => ({ name: p.name, displayName: p.displayName || p.name, isDefault: p.isDefault })));
+// ===== الطباعة =====
+// الإيصال الحراري يُطبع افتراضياً كصورة بدقة الطابعة (203 نقطة/إنش): يمنع اختفاء النص العربي في تعريفات
+// الطابعات الحرارية التي تستبدل خطوط ويندوز بخطوطها الداخلية (السبب الشائع للورقة البيضاء)
+const { renderReceiptImage, wait } = require('./print-image.cjs');
 ipcMain.handle('print', async (_e, html, opts = {}) => {
   const tmp = path.join(os.tmpdir(), `queen-print-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
+  const tmp2 = tmp.replace('.html', '-img.html');
   fs.writeFileSync(tmp, html, 'utf8');
-  const pw = new BrowserWindow({ show: false, width: 400, height: 800, webPreferences: { offscreen: false } });
+  let pw = null;
   try {
-    await pw.loadFile(tmp);
-    await new Promise((r) => setTimeout(r, 250));
     const silent = opts.silent ?? (config.silent && !!(opts.printer ?? config.printer));
     const printOpts = { silent, printBackground: true, copies: Math.max(1, Number(opts.copies) || 1), margins: { marginType: 'none' } };
     const deviceName = opts.printer ?? config.printer;
     if (deviceName) printOpts.deviceName = deviceName;
-    if (opts.thermal) {
-      // طول الإيصال حسب المحتوى، والعرض حسب الورق (80 أو 58 مم)
-      const hPx = await pw.webContents.executeJavaScript('Math.ceil(document.documentElement.scrollHeight)');
-      const widthMm = Number(opts.width) || 80;
-      printOpts.pageSize = { width: widthMm * 1000, height: Math.max(60000, Math.ceil((hPx * 25.4) / 96) * 1000 + 4000) };
+    const mode = opts.mode || config.printMode || 'image';
+    const sizeMode = opts.sizeMode || config.pageSizeMode || 'auto';
+    const paperMm = Number(opts.width) || 80;
+    let file = tmp, hMm = 0;
+    if (opts.thermal && mode === 'image') {
+      const r = await renderReceiptImage(tmp, paperMm);
+      hMm = r.hMm;
+      fs.writeFileSync(tmp2, `<!doctype html><html><head><meta charset="utf-8"><style>@page{margin:0}html,body{margin:0;padding:0;background:#fff}
+        img{display:block;width:${paperMm}mm;height:auto;image-rendering:pixelated}</style></head><body><img src="data:image/png;base64,${r.png.toString('base64')}"></body></html>`, 'utf8');
+      file = tmp2;
     }
-    const result = await new Promise((resolve) => pw.webContents.print(printOpts, (ok, reason) => resolve({ ok, reason })));
-    return result;
+    pw = new BrowserWindow({ show: false, width: 420, height: 900, webPreferences: { backgroundThrottling: false } });
+    await pw.loadFile(file);
+    await pw.webContents.executeJavaScript('Promise.all([...document.images].map((i) => i.complete ? 1 : new Promise((r) => { i.onload = i.onerror = r; })))');
+    await wait(200);
+    if (opts.thermal && sizeMode === 'auto') {
+      // طول الورقة حسب طول الإيصال، والعرض حسب الورق (80 أو 58 مم)
+      if (!hMm) hMm = ((await pw.webContents.executeJavaScript('Math.ceil(document.documentElement.scrollHeight)')) * 25.4) / 96;
+      printOpts.pageSize = { width: paperMm * 1000, height: Math.max(50000, Math.ceil(hMm + 6) * 1000) };
+    }
+    return await new Promise((resolve) => pw.webContents.print(printOpts, (ok, reason) => resolve({ ok, reason: ok ? '' : reason || 'فشل الطباعة' })));
+  } catch (e) {
+    return { ok: false, reason: e.message };
   } finally {
-    pw.destroy(); fs.rm(tmp, () => {});
+    pw?.destroy(); fs.rm(tmp, () => {}); fs.rm(tmp2, () => {});
   }
+});
+// معاينة صورة الإيصال كما ستُطبع (للتشخيص من إعدادات الجهاز)
+ipcMain.handle('print:preview', async (_e, html, opts = {}) => {
+  const tmp = path.join(os.tmpdir(), `queen-prev-${Date.now()}.html`);
+  fs.writeFileSync(tmp, html, 'utf8');
+  try { const r = await renderReceiptImage(tmp, Number(opts.width) || 80); return 'data:image/png;base64,' + r.png.toString('base64'); }
+  catch (e) { return { error: e.message }; } finally { fs.rm(tmp, () => {}); }
 });
 ipcMain.handle('config:get', () => ({ ...config, mode: MODE, version: app.getVersion(), server: baseUrl || config.server }));
 ipcMain.handle('config:set', (_e, patch) => {
-  for (const k of ['printer', 'silent', 'server', 'openAtLogin', 'closeToTray']) if (k in patch) config[k] = patch[k];
+  for (const k of ['printer', 'silent', 'server', 'openAtLogin', 'closeToTray', 'printMode', 'pageSizeMode']) if (k in patch) config[k] = patch[k];
   saveConfig(); applyLogin(); return { ...config };
 });
 ipcMain.handle('discover', async () => dedupe(await discover(1800)));

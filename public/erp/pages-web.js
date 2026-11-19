@@ -100,15 +100,19 @@
   // قسيمة توصيل حرارية تُلصق على الطرد
   function deliverySlip(o) {
     const s = Q.settings, t = s.print_thermal;
-    return `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><style>${Q.print.thermalCSS(t)}</style></head><body>
-      <div class="c b lg">${esc(s.store.name)}</div><div class="c">قسيمة توصيل — المتجر الإلكتروني</div><div class="hr2"></div>
-      <div class="kv"><span>رقم الطلب</span><span class="b">${esc(o.no)}</span></div><div class="kv"><span>التاريخ</span><span>${esc(lt(o.created_at))}</span></div>
-      <div class="hr"></div><div class="b lg">${esc(o.name)}</div><div class="b" dir="ltr" style="text-align:right">${esc(o.phone)}</div>
-      <div>${esc(o.governorate || '')} — ${esc(o.city || '')}</div><div>${esc(o.address || '')}</div>${o.notes ? `<div class="sm">ملاحظة: ${esc(o.notes)}</div>` : ''}
-      <div class="hr"></div><table><tbody>${o.items.map((i) => `<tr class="it"><td>${esc(i.name)}</td><td class="n">× ${Q.qty(i.qty)}</td><td class="n">${fmt(i.price * i.qty)}</td></tr>`).join('')}</tbody></table>
-      <div class="kv"><span>المنتجات</span><span>${fmt(o.subtotal)}</span></div><div class="kv"><span>التوصيل</span><span>${fmt(o.delivery_fee)}</span></div>
-      <div class="tot kv"><span>المطلوب تحصيله</span><span>${fmt(o.total)} ${esc(s.currency)}</span></div>
-      <div class="bc">${Q.print.code128(o.no, { height: 34, module: 1.4 })}</div><div style="height:6mm"></div></body></html>`;
+    const N = (x) => `<span class="n">${fmt(x)}</span>`;
+    return `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><style>${Q.print.thermalCSS(t)}</style></head><body><div class="r">
+      <div class="c b lg">${esc(s.store.name)}</div><span class="ttl">قسيمة توصيل — المتجر الإلكتروني</span>
+      <div class="meta"><div><small>رقم الطلب</small><b class="n" style="text-align:right">${esc(o.no)}</b></div><div><small>التاريخ</small><b class="n" style="text-align:right">${esc(lt(o.created_at))}</b></div></div>
+      <div class="hr2"></div>
+      <div class="b lg">${esc(o.name)}</div><div class="b lg n" style="text-align:right">${esc(o.phone)}</div>
+      <div class="b">${esc(o.governorate || '')}${o.city ? ' — ' + esc(o.city) : ''}</div><div>${esc(o.address || '')}</div>${o.notes ? `<div class="sm">ملاحظة: ${esc(o.notes)}</div>` : ''}
+      <div class="hr"></div>
+      ${o.items.map((i, k) => `<div class="it"><div class="nm"><span class="no">${k + 1}.</span>${esc(i.name)}</div><div class="row sm"><span class="n">${Q.qty(i.qty)} × ${fmt(i.price)}</span><b>${N(i.price * i.qty)}</b></div></div>`).join('')}
+      <div class="hr"></div>
+      <div class="row"><span>المنتجات</span>${N(o.subtotal)}</div><div class="row"><span>التوصيل</span>${N(o.delivery_fee)}</div>
+      <div class="tot"><span>المطلوب تحصيله</span><span><span class="n">${fmt(o.total)}</span> <span style="font-size:.6em">${esc(s.currency)}</span></span></div>
+      <div class="bc">${Q.print.code128(o.no, { height: 38, module: 1.6 })}</div><div class="cut"></div></div></body></html>`;
   }
 
   // ===== منتجات الموقع =====

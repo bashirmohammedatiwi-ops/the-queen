@@ -107,7 +107,7 @@
           <div class="sec-t">رأس الفاتورة</div><div class="fgrid">${inp('title', 'عنوان الفاتورة', t.title)}${inp('header_note', 'سطر إضافي تحت البيانات', t.header_note)}</div>
           <div class="chk-list" style="margin-top:10px">${chk('show_logo', 'إظهار الشعار', t.show_logo)}${chk('show_name', 'إظهار اسم المتجر', t.show_name)}${chk('show_address', 'إظهار العنوان', t.show_address)}
             ${chk('show_phone', 'إظهار الهاتف', t.show_phone)}${chk('show_tax_no', 'إظهار الرقم الضريبي', t.show_tax_no)}${chk('show_cashier', 'إظهار اسم الكاشير', t.show_cashier)}
-            ${chk('show_customer', 'إظهار اسم العميل', t.show_customer)}${chk('show_sku', 'إظهار رمز الصنف', t.show_sku)}${chk('show_tax_summary', 'تفصيل الضريبة', t.show_tax_summary)}${chk('show_barcode', 'باركود رقم الفاتورة', t.show_barcode)}</div>
+            ${chk('show_customer', 'إظهار اسم العميل', t.show_customer)}${chk('show_sku', 'إظهار رمز الصنف', t.show_sku)}${chk('show_tax_summary', 'تفصيل الضريبة', t.show_tax_summary)}${chk('show_barcode', 'باركود رقم الفاتورة', t.show_barcode)}${chk('show_words', 'المبلغ كتابةً', t.show_words !== false)}</div>
           <div class="sec-t">التذييل</div><div class="fgrid">${inp('footer', 'رسالة الشكر', t.footer)}${inp('footer2', 'سطر سياسة الاستبدال', t.footer2)}</div>
         </div></div>
         <div class="card hidden" id="f-a4"><div class="card-b">

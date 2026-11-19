@@ -77,34 +77,42 @@
     const thermal = opts.thermal ?? /@page\{size:\d+mm auto/.test(html);
     if (thermal && window.desktop?.print) {
       const cfg = await window.desktop.getConfig();
-      const r = await window.desktop.print(html, { thermal: true, copies: opts.copies || 1, width: Q.settings?.print_thermal?.width || 80, silent: cfg.silent && !!cfg.printer });
+      const r = await window.desktop.print(html, { thermal: true, copies: opts.copies || 1, width: Q.settings?.print_thermal?.width || 80, silent: cfg.silent && !!cfg.printer, mode: cfg.printMode, sizeMode: cfg.pageSizeMode });
       if (!r.ok && r.reason && !/cancel/i.test(r.reason)) Q.toast('تعذرت الطباعة: ' + r.reason + ' — تحقق من الطابعة من زر "الطابعة"', 'err');
       return;
     }
     return P.runFrame(html, opts);
   };
   // إعدادات طابعة هذا الجهاز (تطبيق سطح المكتب فقط)
+  P.testReceipt = (s = Q.settings) => P.thermal({ number: 'TEST-0001', type: 'sale', date: new Date().toISOString().replace('T', ' ').slice(0, 16), user_name: 'طباعة تجريبية', customer_name: '',
+    items: [{ name: 'عطر تجريبي 100 مل — إذا ظهر هذا النص فالطباعة سليمة', barcode: '6281000000001', qty: 1, price: 25000, discount: 0, total: 25000 }, { name: 'كريم مرطب', qty: 2, price: 7500, discount: 0, total: 15000 }],
+    subtotal: 40000, discount: 0, tax: 0, total: 40000, paid_cash: 40000, tendered: 50000, paid_card: 0, credit: 0, tax_rate: 0 }, s);
+  // إعدادات طابعة هذا الجهاز (تطبيق سطح المكتب فقط)
   P.deviceDialog = async () => {
     if (!window.desktop) return;
     const [cfg, printers] = await Promise.all([window.desktop.getConfig(), window.desktop.printers()]);
+    const opt = (v, cur, l) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`;
     const m = Q.modal({
-      title: 'إعدادات هذا الجهاز', width: 460,
-      body: `<label class="f"><span>طابعة الإيصالات الحرارية</span><select class="input" id="dp"><option value="">— اختيار عند كل طباعة —</option>
+      title: 'إعدادات طابعة هذا الجهاز', width: 640,
+      body: `<div style="display:grid;grid-template-columns:1fr 250px;gap:16px"><div>
+        <label class="f"><span>طابعة الإيصالات الحرارية</span><select class="input" id="dp"><option value="">— اختيار عند كل طباعة —</option>
           ${printers.map((p) => `<option value="${esc(p.name)}" ${p.name === cfg.printer ? 'selected' : ''}>${esc(p.displayName)}${p.isDefault ? ' (الافتراضية)' : ''}</option>`).join('')}</select></label>
         <label class="chk" style="margin-top:10px"><input type="checkbox" id="ds" ${cfg.silent ? 'checked' : ''}> طباعة مباشرة بدون نافذة الطباعة</label>
-        <div class="faint" style="font-size:12px;margin-top:8px">عرض الورق والتصميم من: النظام الإداري ← إعدادات الطباعة.</div>
+        <label class="f" style="margin-top:12px"><span>طريقة الطباعة</span><select class="input" id="dm">${opt('image', cfg.printMode || 'image', 'صورة — موصى بها (تمنع اختفاء النص العربي)')}${opt('text', cfg.printMode, 'نص — أسرع لكنها قد لا تعمل مع بعض الطابعات')}</select></label>
+        <label class="f" style="margin-top:10px"><span>طول الورقة</span><select class="input" id="dz">${opt('auto', cfg.pageSizeMode || 'auto', 'تلقائي حسب طول الإيصال (موصى به)')}${opt('driver', cfg.pageSizeMode, 'حسب إعداد ورق الطابعة في ويندوز')}</select></label>
+        <div class="faint" style="font-size:12px;margin-top:10px;line-height:1.7">إذا خرجت ورقة بيضاء: جرّب «صورة» ثم «طول الورقة: حسب إعداد الطابعة».<br>عرض الورق (80/58 مم) وتصميم الإيصال من: النظام الإداري ← إعدادات الطباعة.</div>
         ${cfg.mode === 'pos' ? `<div class="divider"></div><div class="muted">متصل بالخادم: <span class="mono" dir="ltr">${esc(cfg.server || '')}</span></div><button class="btn sm" id="dc" style="margin-top:6px">تغيير الخادم</button>` : ''}
-        <div class="faint" style="font-size:11.5px;margin-top:12px">الإصدار ${esc(cfg.version)}</div>`,
+        <div class="faint" style="font-size:11.5px;margin-top:12px">الإصدار ${esc(cfg.version)}</div></div>
+        <div><div class="muted" style="font-size:12px;margin-bottom:4px">معاينة ما سيُطبع</div><div id="pv" style="border:1px solid var(--line);border-radius:6px;height:380px;overflow:auto;background:#f4f4f4;display:grid;place-items:start center;padding:6px"><span class="faint" style="align-self:center">…</span></div></div></div>`,
       foot: '<button class="btn primary" data-ok>حفظ</button><button class="btn" data-t>طباعة تجريبية</button>',
     });
-    const save = () => window.desktop.setConfig({ printer: m.$('#dp').value, silent: m.$('#ds').checked });
+    const save = () => window.desktop.setConfig({ printer: m.$('#dp').value, silent: m.$('#ds').checked, printMode: m.$('#dm').value, pageSizeMode: m.$('#dz').value });
+    const width = Q.settings?.print_thermal?.width || 80;
+    if (window.desktop.previewPrint) window.desktop.previewPrint(P.testReceipt(), { width }).then((src) => {
+      m.$('#pv').innerHTML = typeof src === 'string' ? `<img src="${src}" style="width:100%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.15)">` : `<span class="err">${esc(src?.error || 'تعذرت المعاينة')}</span>`;
+    });
     m.$('[data-ok]').onclick = async () => { await save(); m.close(); Q.toast('تم حفظ إعدادات الجهاز', 'ok'); };
-    m.$('[data-t]').onclick = async () => {
-      await save();
-      const s = Q.settings;
-      P.run(P.thermal({ number: 'TEST-0001', type: 'sale', date: new Date().toISOString().replace('T', ' ').slice(0, 16), user_name: 'تجربة طباعة',
-        items: [{ name: 'صنف تجريبي', qty: 1, price: 1000, discount: 0, total: 1000 }], subtotal: 1000, discount: 0, tax: 0, total: 1000, paid_cash: 1000, paid_card: 0, credit: 0, tax_rate: 0 }, s));
-    };
+    m.$('[data-t]').onclick = async () => { await save(); P.run(P.testReceipt()); Q.toast('تم إرسال طباعة تجريبية'); };
     m.$('#dc') && (m.$('#dc').onclick = () => { m.close(); window.desktop.showConnect(); });
   };
 
@@ -138,71 +146,87 @@
   const typeTitle = (inv, t) => (inv.type === 'return' ? 'إشعار دائن / مرتجع مبيعات' : t);
 
   // ===== الفاتورة الحرارية =====
+  // عرض المحتوى = المساحة القابلة للطباعة فعلياً (72 مم لورق 80، و48 مم لورق 58) حتى لا يُقص أي جزء
   P.thermalCSS = (t) => {
     const W = Number(t.width) || 80, m = Number(t.margin) || 0, fs = Number(t.font_size) || 12;
-    return `@page{size:${W}mm auto;margin:0}*{box-sizing:border-box}
+    const CW = Math.min(W - 2 * m, W >= 76 ? 72 : W >= 56 ? 48 : W - 4);
+    return `@page{size:${W}mm auto;margin:0}*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
     html,body{margin:0;padding:0;background:#fff}
-    body{width:${W}mm;padding:${m}mm ${m + 1}mm;font-family:Tahoma,"Segoe UI",Arial,sans-serif;font-size:${fs}px;line-height:1.45;color:#000;direction:rtl}
-    .c{text-align:center}.b{font-weight:700}.sm{font-size:${fs - 1.5}px}.lg{font-size:${fs + 4}px}
-    .logo{display:block;margin:0 auto 4px;max-width:${t.logo_width || 45}mm;max-height:28mm;object-fit:contain;filter:grayscale(1)}
-    .hr{border-top:1px dashed #000;margin:5px 0}.hr2{border-top:2px solid #000;margin:5px 0}
-    .kv{display:flex;justify-content:space-between;gap:6px}.kv span:last-child{direction:ltr;text-align:left;font-variant-numeric:tabular-nums}
-    table{width:100%;border-collapse:collapse}th{font-size:${fs - 1}px;text-align:right;border-bottom:1px solid #000;padding:2px 0}
-    td{padding:2px 0;vertical-align:top}.n{text-align:left;direction:ltr;font-variant-numeric:tabular-nums;white-space:nowrap}
-    .it td{border-bottom:1px dotted #999}.tot{font-size:${fs + 3}px;font-weight:700;border:2px solid #000;padding:4px 6px;margin:5px 0}
-    .bc{text-align:center;margin-top:6px}.bc svg{width:85%}`;
+    body{width:${W}mm;font-family:Tahoma,"Segoe UI",Arial,sans-serif;font-size:${fs}px;line-height:1.4;color:#000;direction:rtl}
+    .r{width:${CW}mm;margin:0 auto;padding:${Math.max(2, m + 1)}mm 0 0}
+    .c{text-align:center}.b{font-weight:700}.sm{font-size:${fs - 1.5}px}.xs{font-size:${fs - 2.5}px}.lg{font-size:${fs + 5}px;line-height:1.25}
+    .n{direction:ltr;unicode-bidi:isolate;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .logo{display:block;margin:0 auto 3px;max-width:${Math.min(t.logo_width || 45, CW)}mm;max-height:26mm;object-fit:contain;filter:grayscale(1) contrast(1.4)}
+    .hr{border-top:1px dashed #000;margin:6px 0}.hr2{border-top:2px solid #000;margin:6px 0}
+    .ttl{display:block;width:fit-content;margin:6px auto;padding:3px 14px;background:#000;color:#fff;font-weight:700;font-size:${fs + 1}px;border-radius:3px}
+    .meta{display:grid;grid-template-columns:1fr 1fr;gap:3px 8px;margin:4px 0}.meta div{min-width:0}
+    .meta small{display:block;font-size:${fs - 2.5}px;line-height:1.2}.meta b{display:block;font-size:${fs}px;overflow-wrap:anywhere}
+    .row{display:flex;justify-content:space-between;align-items:baseline;gap:6px}
+    .ih{display:flex;justify-content:space-between;font-size:${fs - 2}px;font-weight:700;border-bottom:1.5px solid #000;padding-bottom:2px;margin-bottom:2px}
+    .it{padding:4px 0;border-bottom:1px dotted #000}.it:last-child{border-bottom:0}
+    .it .nm{font-weight:700;overflow-wrap:anywhere}.it .no{display:inline-block;min-width:4mm}
+    .tot{display:flex;justify-content:space-between;align-items:center;background:#000;color:#fff;padding:5px 7px;margin:6px 0;border-radius:3px}
+    .tot span:first-child{font-weight:700;font-size:${fs + 1}px}.tot .n{font-size:${fs + 7}px;font-weight:700}
+    .chg{display:flex;justify-content:space-between;align-items:center;border:2px solid #000;padding:3px 7px;margin-top:4px;border-radius:3px;font-weight:700}
+    .chg .n{font-size:${fs + 4}px}
+    .words{font-size:${fs - 2}px;text-align:center;margin:4px 0 2px;line-height:1.5}
+    .bc{text-align:center;margin-top:6px}.bc svg{width:92%;height:auto}
+    .cut{height:8mm}`;
   };
   P.thermal = (inv, s = Q.settings) => {
     const t = s.print_thermal, st = s.store, cur = s.currency;
     const rate = inv.tax_rate ?? s.tax.rate;
     const isRet = inv.type === 'return';
-    const items = inv.items.map((i) => `<tr class="it"><td colspan="3"><div class="b">${esc(i.name)}</div>
-      ${t.show_sku && (i.sku || i.barcode) ? `<div class="sm">${esc(i.sku || i.barcode)}</div>` : ''}
-      <div class="kv sm"><span>${Q.qty(i.qty)} × ${f(i.price)}${i.discount ? ` - خصم ${f(i.discount)}` : ''}</span><span class="b">${f(i.total)}</span></div></td></tr>`).join('');
+    const N = (x) => `<span class="n">${f(x)}</span>`;
+    const pieces = inv.items.reduce((a, i) => a + Number(i.qty), 0);
+    const items = inv.items.map((i, k) => `<div class="it"><div class="nm"><span class="no">${k + 1}.</span>${esc(i.name)}</div>
+      ${t.show_sku && (i.sku || i.barcode) ? `<div class="xs n" style="text-align:right">${esc(i.sku || i.barcode)}</div>` : ''}
+      <div class="row"><span class="sm"><span class="n">${Q.qty(i.qty)} × ${f(i.price)}</span>${i.discount ? ` <span class="xs">(خصم ${f(i.discount)})</span>` : ''}</span><b>${N(i.total)}</b></div></div>`).join('');
     const change = inv.tendered && inv.tendered > inv.paid_cash ? Q.n(inv.tendered - inv.paid_cash) : 0;
-    return `<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${esc(inv.number)}</title><style>${P.thermalCSS(t)}</style></head><body>
+    const [d, tm] = String(Q.dt(inv.date) || '').split(' ');
+    return `<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${esc(inv.number)}</title><style>${P.thermalCSS(t)}</style></head><body><div class="r">
       ${t.show_logo && st.logo ? `<img class="logo" src="${st.logo}">` : ''}
       ${t.show_name ? `<div class="c b lg">${storeName(s)}</div>${st.name_ar && st.name ? `<div class="c b">${esc(st.name_ar)}</div>` : ''}` : ''}
       ${st.activity ? `<div class="c sm">${esc(st.activity)}</div>` : ''}
       ${t.show_address && st.address ? `<div class="c sm">${esc(st.address)}</div>` : ''}
-      ${t.show_phone && st.phone ? `<div class="c sm">هاتف: <span dir="ltr">${esc(st.phone)}</span></div>` : ''}
-      ${t.show_tax_no && st.tax_no ? `<div class="c sm">الرقم الضريبي: ${esc(st.tax_no)}</div>` : ''}
+      ${t.show_phone && st.phone ? `<div class="c sm">هاتف: <span class="n">${esc(st.phone)}</span></div>` : ''}
+      ${t.show_tax_no && st.tax_no ? `<div class="c xs">الرقم الضريبي: <span class="n">${esc(st.tax_no)}</span></div>` : ''}
       ${t.header_note ? `<div class="c sm">${esc(t.header_note)}</div>` : ''}
-      <div class="hr2"></div>
-      <div class="c b">${esc(typeTitle(inv, t.title))}</div>
-      <div class="hr"></div>
-      <div class="kv"><span>رقم الفاتورة</span><span class="b">${esc(inv.number)}</span></div>
-      ${isRet && inv.ref_number ? `<div class="kv"><span>عن فاتورة</span><span>${esc(inv.ref_number)}</span></div>` : ''}
-      <div class="kv"><span>التاريخ</span><span>${esc(Q.dt(inv.date))}</span></div>
-      ${t.show_cashier && inv.user_name ? `<div class="kv"><span>الكاشير</span><span>${esc(inv.user_name)}</span></div>` : ''}
-      ${t.show_customer && inv.customer_name ? `<div class="kv"><span>العميل</span><span>${esc(inv.customer_name)}</span></div>` : ''}
-      <div class="hr"></div>
-      <table><thead><tr><th colspan="3"><div class="kv"><span>الصنف / الكمية × السعر</span><span>المبلغ</span></div></th></tr></thead><tbody>${items}</tbody></table>
-      <div style="margin-top:4px">
-        <div class="kv"><span>عدد الأصناف</span><span>${inv.items.reduce((a, i) => a + Number(i.qty), 0)}</span></div>
-        <div class="kv"><span>المجموع</span><span>${f(inv.subtotal)}</span></div>
-        ${inv.discount ? `<div class="kv"><span>الخصم</span><span>-${f(inv.discount)}</span></div>` : ''}
-        ${t.show_tax_summary && inv.tax ? `<div class="kv"><span>الإجمالي غير شامل الضريبة</span><span>${f(inv.total - inv.tax)}</span></div>
-        <div class="kv"><span>ضريبة القيمة المضافة ${rate}%</span><span>${f(inv.tax)}</span></div>` : ''}
+      <span class="ttl">${esc(typeTitle(inv, t.title))}</span>
+      <div class="meta">
+        <div><small>رقم الفاتورة</small><b class="n" style="text-align:right">${esc(inv.number)}</b></div>
+        <div><small>التاريخ والوقت</small><b><span class="n">${esc(d || '')}</span> <span class="n">${esc(tm || '')}</span></b></div>
+        ${isRet && inv.ref_number ? `<div><small>عن فاتورة</small><b class="n" style="text-align:right">${esc(inv.ref_number)}</b></div>` : ''}
+        ${t.show_cashier && inv.user_name ? `<div><small>الكاشير</small><b>${esc(inv.user_name)}</b></div>` : ''}
+        ${t.show_customer && inv.customer_name ? `<div><small>العميل</small><b>${esc(inv.customer_name)}</b></div>` : ''}
       </div>
-      <div class="tot kv"><span>${isRet ? 'المبلغ المسترد' : 'الإجمالي'}</span><span>${f(inv.total)} ${esc(cur)}</span></div>
-      ${inv.paid_cash ? `<div class="kv"><span>نقدي</span><span>${f(inv.paid_cash)}</span></div>` : ''}
-      ${inv.paid_card ? `<div class="kv"><span>شبكة</span><span>${f(inv.paid_card)}</span></div>` : ''}
-      ${inv.credit ? `<div class="kv"><span>آجل (على الحساب)</span><span>${f(inv.credit)}</span></div>` : ''}
-      ${inv.tendered ? `<div class="kv"><span>المدفوع</span><span>${f(inv.tendered)}</span></div><div class="kv b"><span>الباقي</span><span>${f(change)}</span></div>` : ''}
-      ${t.show_barcode ? `<div class="bc">${P.code128(inv.number, { height: 34, module: 1.4 })}</div>` : ''}
+      <div class="hr2"></div>
+      <div class="ih"><span>الصنف — الكمية × السعر</span><span>المبلغ</span></div>
+      ${items}
+      <div class="hr"></div>
+      <div class="row sm"><span>عدد الأصناف / القطع</span><span class="n">${inv.items.length} / ${Q.qty(pieces)}</span></div>
+      <div class="row"><span>المجموع</span>${N(inv.subtotal)}</div>
+      ${inv.discount ? `<div class="row"><span>الخصم</span><span class="n">-${f(inv.discount)}</span></div>` : ''}
+      ${t.show_tax_summary && inv.tax ? `<div class="row sm"><span>قبل الضريبة</span>${N(inv.total - inv.tax)}</div><div class="row sm"><span>الضريبة ${rate}%</span>${N(inv.tax)}</div>` : ''}
+      <div class="tot"><span>${isRet ? 'المبلغ المسترد' : 'الإجمالي'}</span><span><span class="n">${f(inv.total)}</span> <span style="font-size:.6em">${esc(cur)}</span></span></div>
+      ${t.show_words !== false ? `<div class="words">${esc(P.words(inv.total, 'IQD'))}</div>` : ''}
+      ${inv.paid_cash ? `<div class="row"><span>نقدي</span>${N(inv.paid_cash)}</div>` : ''}
+      ${inv.paid_card ? `<div class="row"><span>بطاقة / شبكة</span>${N(inv.paid_card)}</div>` : ''}
+      ${inv.credit ? `<div class="row b"><span>آجل على الحساب</span>${N(inv.credit)}</div>` : ''}
+      ${inv.tendered && change > 0 ? `<div class="row"><span>المستلم من العميل</span>${N(inv.tendered)}</div><div class="chg"><span>الباقي للعميل</span>${N(change)}</div>` : ''}
+      ${t.show_barcode ? `<div class="bc">${P.code128(inv.number, { height: 38, module: 1.6 })}</div>` : ''}
       <div class="hr"></div>
       ${t.footer ? `<div class="c b">${esc(t.footer)}</div>` : ''}
       ${t.footer2 ? `<div class="c sm">${esc(t.footer2)}</div>` : ''}
-      <div style="height:6mm"></div>
-    </body></html>`;
+      <div class="cut"></div>
+    </div></body></html>`;
   };
 
   P.shiftThermal = (sum, s = Q.settings) => {
     const t = s.print_thermal, sh = sum.shift;
     const kv = (k, v, b) => `<div class="kv ${b ? 'b' : ''}"><span>${k}</span><span>${v}</span></div>`;
-    return `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><style>${P.thermalCSS(t)}</style></head><body>
-      <div class="c b lg">${storeName(s)}</div><div class="c b">تقرير إغلاق وردية #${sh.id}</div><div class="hr2"></div>
+    return `<!doctype html><html dir="rtl"><head><meta charset="utf-8"><style>${P.thermalCSS(t)} .kv{display:flex;justify-content:space-between;gap:6px}.kv span:last-child{direction:ltr;font-variant-numeric:tabular-nums}</style></head><body><div class="r">
+      <div class="c b lg">${storeName(s)}</div><span class="ttl">تقرير إغلاق وردية #${sh.id}</span><div class="hr2"></div>
       ${kv('الكاشير', esc(sh.user_name))}${kv('الفتح', esc(Q.dt(sh.opened_at)))}${kv('الإغلاق', esc(Q.dt(sh.closed_at) || '—'))}
       <div class="hr"></div>
       ${kv('عدد فواتير البيع', sum.sales.n)}${kv('إجمالي المبيعات', f(sum.sales.total))}${kv('  نقدي', f(sum.sales.cash))}
@@ -211,7 +235,7 @@
       <div class="hr"></div>
       ${kv('رصيد الافتتاح', f(sh.opening_cash))}${kv('النقد المتوقع', f(sum.expected_cash), 1)}
       ${sh.counted_cash != null ? kv('النقد الفعلي', f(sh.counted_cash), 1) + kv('الفرق', f(sh.counted_cash - sum.expected_cash)) : ''}
-      <div class="hr"></div><div class="c sm">${esc(Q.dt(new Date().toISOString().replace('T', ' ')))}</div><div style="height:6mm"></div></body></html>`;
+      <div class="hr"></div><div class="c sm">${esc(Q.dt(new Date().toISOString().replace('T', ' ')))}</div><div class="cut"></div></div></body></html>`;
   };
 
   // ===== قالب A4 =====

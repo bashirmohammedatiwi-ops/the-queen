@@ -3,7 +3,7 @@
   "productName": "The Queen POS",
   "executableName": "TheQueenPOS",
   "directories": { "output": "../dist", "buildResources": "build" },
-  "files": ["main.cjs", "preload.cjs", "connect.html", "package.json"],
+  "files": ["main.cjs", "preload.cjs", "print-image.cjs", "connect.html", "package.json"],
   "electronDist": ".electron/win32",
   "electronVersion": "45.3.2",
   "compression": "normal",
